@@ -1,0 +1,20 @@
+# Copy to .dev.vars for local `wrangler dev` testing. All of these are optional — the
+# app works fully without any of them (open refresh endpoint).
+
+# Protects POST /api/refresh from random callers. Pick any random string.
+REFRESH_KEY=
+
+# Enables the abuse.ch sources (URLhaus, ThreatFox, MalwareBazaar) — an aggregated
+# summary item per feed in the main feed, plus raw indicators (hashes/IPs/domains/
+# URLs, capped per feed) on the dedicated IOCs tab. Free key: register at
+# https://auth.abuse.ch/ then generate a key from your account page.
+ABUSECH_AUTH_KEY=
+
+# Enables real (measured, not claimed) DDoS attack-traffic telemetry from Cloudflare
+# Radar on the Map page — a percentage breakdown of L3/L4 attack vectors and L7 HTTP
+# methods targeting India over the last 7 days. Free token: Cloudflare dashboard >
+# My Profile > API Tokens > Create Token > Custom Token, with Account > Radar > Read.
+CF_RADAR_TOKEN=
+
+# Enables AbuseIPDB abuse-confidence scores for IP indicators on the IOCs page (free: https://www.abuseipdb.com/account/api).
+ABUSEIPDB_API_KEY=

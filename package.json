@@ -1,0 +1,16 @@
+{
+  "name": "cti-watch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "APJ / India-priority threat intelligence dashboard — Cloudflare Worker backend + static frontend.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "refresh": "curl -X POST \"$WORKER_URL/api/refresh\" -H \"x-refresh-key: $REFRESH_KEY\""
+  },
+  "devDependencies": {
+    "wrangler": "^4.114.0"
+  }
+}

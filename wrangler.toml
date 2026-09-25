@@ -1,0 +1,42 @@
+name = "cti-watch"
+main = "src/worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Two schedules, both handled by the same scheduled() export (src/worker.js branches on
+# event.cron): the full ~25-source collect() every 30 min, plus a faster 10-min job
+# (collectVulnerabilitiesOnly()) that only re-checks NVD/GitHub Advisories/CISA KEV so newly
+# disclosed or newly-exploited CVEs land on the Vulnerabilities tab sooner, without re-scraping
+# every RSS feed and Telegram channel on that cadence. 48 + 144 runs/day is still well inside the
+# Workers free tier (100k requests/day, cron invocations count toward that).
+#
+# The fast job's minutes are deliberately offset (5,15,25,... not */10) so it never fires in the
+# same tick as the slow job — both jobs do an unsynchronized read-modify-write of the same KV key
+# ("latest"), and when they coincided at :00/:30, the fast job (finishing sooner — far fewer
+# sources) could read `prev` before the slow job's write landed, then write *after* it with that
+# stale snapshot, silently wiping every field only collect() populates (iocs, telegram,
+# ransomwareNews, ddosTelemetry — anything collectVulnerabilitiesOnly() only passes through via
+# `Object.assign({}, prev, {...})` rather than repopulating itself). Observed in production:
+# abuse.ch/MISP/Radar sourceStatus entries and the entire `iocs` array intermittently vanishing on
+# scheduled runs while always working fine on a manual POST /api/refresh (a single invocation, no
+# concurrent writer). A 5-minute offset gives collect() a full cycle's worth of headroom to finish
+# and write before the next fast-job tick can read a stale `prev`.
+#
+# Third schedule ("17 3 * * *", daily): collectAptSheet() pulls the APT Groups & Operations Google
+# Sheet into its own KV keys (apt_groups / apt_groups_meta), never "latest", so it can't race the
+# two jobs above. Minute 17 is also outside both of their minute lists.
+[triggers]
+crons = ["*/30 * * * *", "5,15,25,35,45,55 * * * *", "17 3 * * *"]
+
+# Create with: wrangler kv namespace create THREAT_DATA
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "THREAT_DATA"
+id = "b8e682f06db8479d97731298379f3522"
+
+# Static frontend. Everything under /api/* is routed to the Worker (src/worker.js);
+# everything else is served directly from ./public.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
