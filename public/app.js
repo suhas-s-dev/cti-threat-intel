@@ -216,6 +216,7 @@ function showTab(id, opts){
     else a.removeAttribute("aria-current");
   });
   if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id);
+  if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
   if (id === "map"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
     // recompute now that the section actually has layout dimensions.
@@ -288,9 +289,20 @@ async function loadData(){
   iocItems = (json.iocs || []).map(i => Object.assign({}, i, { firstSeen: i.firstSeen ? new Date(i.firstSeen) : null }));
 
   const statusEntries = Object.entries(json.sourceStatus || {});
-  $("#srcbar").innerHTML = statusEntries.map(([name, s]) =>
-    '<span class="srcpill ' + (s.ok ? "ok" : "fail") + '">' + esc(name) + " · " + (s.ok ? s.count + " items" : "unavailable") + "</span>"
-  ).join("") + '<span class="srcpill ' + (rwVictims.length ? "ok" : "fail") + '">ransomware.live · ' + rwVictims.length + " claims</span>";
+  // Per-source tiles: count on success, the upstream error on failure. The backend doesn't keep a
+  // per-source fetch time, so freshness is shown per collection job (full cycle vs CVE/RSS rotation),
+  // not invented per feed.
+  const tileHtml = (name, ok, detail, title) =>
+    '<span class="srcpill ' + (ok ? "ok" : "fail") + '"' + (title ? ' title="' + esc(title) + '"' : "") + "><b>" + esc(name) + "</b><small>" + esc(detail) + "</small></span>";
+  const failed = statusEntries.filter(([, s]) => !s.ok);
+  const fresh = [
+    json.generated ? "Full collection " + relTime(json.generated) + " (every 30 min)" : "",
+    json.vulnGenerated ? "CVE + RSS rotation " + relTime(json.vulnGenerated) + " (every 10 min)" : ""
+  ].filter(Boolean).join(" · ");
+  $("#srcbar").innerHTML = (fresh ? '<div class="src-fresh">' + esc(fresh) + "</div>" : "") +
+    [...failed, ...statusEntries.filter(([, s]) => s.ok)].map(([name, s]) =>
+      tileHtml(name, s.ok, s.ok ? s.count + " items" : (String(s.error || "unavailable").slice(0, 40)), s.ok ? name : name + " — " + (s.error || "unavailable"))
+    ).join("") + tileHtml("ransomware.live", !!rwVictims.length, rwVictims.length + " claims");
   const okCount = statusEntries.filter(([,s]) => s.ok).length + (rwVictims.length ? 1 : 0);
   const totalCount = statusEntries.length + 1;
   const srcSummary = $("#srcsummary");
@@ -313,6 +325,14 @@ async function loadData(){
   if (footRadar) footRadar.textContent = statusEntries.some(([name]) => name === "Cloudflare Radar") ? ", Cloudflare Radar" : "";
 }
 
+function relTime(iso){
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (isNaN(m)) return "at an unknown time";
+  if (m < 1) return "just now";
+  if (m < 60) return m + " min ago";
+  if (m < 48 * 60) return Math.round(m / 60) + " h ago";
+  return Math.round(m / 1440) + " days ago";
+}
 function fmtDate(d){ if (!d) return ""; return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 
 /* ---------------- Rendering: ransomware panel ---------------- */
@@ -700,6 +720,7 @@ function renderVulnerabilities(){
       + (DATA.vulnGenerated ? " CVE sources last checked " + new Date(DATA.vulnGenerated).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) + " (refreshes every 10 min)." : "")
     : "";
   const list = visibleVulns();
+  renderVulnMatrix(list);
   if (!list.length){ el.innerHTML = '<tr><td colspan="7" class="empty">No vulnerabilities match this view.</td></tr>'; return; }
   el.innerHTML = list.slice(0, 200).map(v => {
     const cls = cvssClass(v.cvssScore);
@@ -716,6 +737,113 @@ function renderVulnerabilities(){
       '<td data-label="Published / Added" class="text-muted">' + (v.date ? esc(v.date.toISOString().slice(0,10)) : "—") + "</td>" +
     "</tr>";
   }).join("");
+}
+
+/* ---------------- Vulnerabilities: CVSS × EPSS triage matrix ---------------- */
+// Scatter of the rows currently visible in the table (same filter + search), so it answers "which of
+// these are severe AND likely to be exploited" at a glance. EPSS is on a log axis: almost every score
+// is under 1%, and a linear axis would pile them all onto the floor. Colours come from the theme
+// tokens, so the chart is re-rendered on theme toggle (wireThemeToggle) and resized on tab open.
+const EPSS_MIN = 0.0001;
+const MATRIX_CVSS_LINE = 9, MATRIX_EPSS_LINE = 0.1; // CVSS "critical"; FIRST.org's "elevated" EPSS
+// CVEs with EPSS but no CVSS go in a lane left of the CVSS axis instead of being dropped: CISA KEV
+// entries arrive without a CVSS score, so without this lane the chart would hide every
+// actively-exploited CVE — the ones it matters most to see. Points are spread across the lane by a
+// stable per-CVE offset so they don't stack into one column.
+const MATRIX_LANE = [-1.7, -0.3];
+function laneX(id){
+  let h = 0;
+  for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return MATRIX_LANE[0] + 0.15 + (h % 1000) / 1000 * (MATRIX_LANE[1] - MATRIX_LANE[0] - 0.3);
+}
+let chartVulnMatrixInst = null;
+function cssToken(name){ return getComputedStyle(document.body).getPropertyValue(name).trim(); }
+function hexA(hex, a){
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+}
+function renderVulnMatrix(list){
+  const canvas = document.getElementById("chartVulnMatrix");
+  const note = $("#vuln-matrix-note");
+  if (!canvas || typeof Chart === "undefined") return;
+  const pts = list.filter(v => v.epss != null).map(v => ({
+    x: v.cvssScore != null ? v.cvssScore : laneX(v.cveId), y: Math.max(EPSS_MIN, v.epss), v
+  }));
+  const hot = pts.filter(p => p.v.cvssScore != null && p.x >= MATRIX_CVSS_LINE && p.v.epss >= MATRIX_EPSS_LINE).length;
+  const laneHot = pts.filter(p => p.v.cvssScore == null && p.v.epss >= MATRIX_EPSS_LINE).length;
+  if (note) note.textContent = pts.length
+    ? pts.length + " plotted of " + list.length + " in view (needs an EPSS score) · " + hot + " in the severe-and-likely corner" +
+      (laneHot ? " · " + laneHot + " more above 10% EPSS with no CVSS" : "")
+    : "Nothing to plot — no CVE in this view has an EPSS score.";
+  const red = cssToken("--lvl-red"), accent = cssToken("--color-accent"), text = cssToken("--color-text"),
+    muted = cssToken("--color-neutral-700"), line = cssToken("--color-divider"), mono = "'IBM Plex Mono', ui-monospace, monospace";
+  const datasets = [
+    { label: "Exploited (CISA KEV)", data: pts.filter(p => p.v.kev), backgroundColor: hexA(red, .8), borderColor: red, pointRadius: 5, pointHoverRadius: 7 },
+    { label: "Tracked", data: pts.filter(p => !p.v.kev), backgroundColor: hexA(accent, .45), borderColor: accent, pointRadius: 3.5, pointHoverRadius: 6 }
+  ];
+  const tick = { color: muted, font: { family: mono, size: 10 } };
+  const options = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: cssToken("--color-panel"), borderColor: line, borderWidth: 1, titleColor: text, bodyColor: muted,
+        titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 10.5 }, padding: 10, cornerRadius: 8,
+        callbacks: {
+          title: items => items[0].raw.v.cveId + (items[0].raw.v.kev ? "  · KEV" : ""),
+          label: item => {
+            const v = item.raw.v;
+            return ["CVSS " + (v.cvssScore != null ? v.cvssScore.toFixed(1) : "n/a") + " · EPSS " + (v.epss * 100).toFixed(2) + "%", [v.vendor, v.product].filter(Boolean).join(" ").slice(0, 60)].filter(Boolean);
+          }
+        }
+      }
+    },
+    scales: {
+      x: { min: MATRIX_LANE[0], max: 10, title: { display: true, text: "CVSS severity →", color: muted, font: { family: mono, size: 10 } },
+        afterBuildTicks: ax => { ax.ticks = Array.from({ length: 11 }, (_, i) => ({ value: i })); },
+        ticks: { ...tick }, grid: { color: hexA(line, .6) }, border: { display: false } },
+      y: { type: "logarithmic", min: EPSS_MIN, max: 1, title: { display: true, text: "EPSS exploitation probability →", color: muted, font: { family: mono, size: 10 } },
+        ticks: { ...tick, callback: val => [0.0001, 0.001, 0.01, 0.1, 1].includes(val) ? (val * 100) + "%" : null }, grid: { color: hexA(line, .6) }, border: { display: false } }
+    },
+    onHover: (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : "default"; },
+    // Clicking a point narrows the table to that CVE via the existing search box.
+    onClick: (e, els, chart) => {
+      if (!els.length) return;
+      const v = chart.data.datasets[els[0].datasetIndex].data[els[0].index].v;
+      const input = $("#vuln-search");
+      if (input) input.value = v.cveId;
+      vulnSearch = v.cveId.toLowerCase();
+      renderVulnerabilities();
+    }
+  };
+  // Quadrant guides: CVSS 9 / EPSS 10%, with the severe-and-likely corner shaded.
+  const quadrants = {
+    id: "vulnQuadrants",
+    beforeDatasetsDraw(chart){
+      const { ctx, chartArea: a, scales: { x, y } } = chart;
+      const qx = x.getPixelForValue(MATRIX_CVSS_LINE), qy = y.getPixelForValue(MATRIX_EPSS_LINE);
+      const l0 = x.getPixelForValue(MATRIX_LANE[0]), l1 = x.getPixelForValue(MATRIX_LANE[1]);
+      ctx.save();
+      ctx.fillStyle = hexA(muted, .08); ctx.fillRect(l0, a.top, l1 - l0, a.bottom - a.top);
+      ctx.fillStyle = muted; ctx.font = "600 9.5px " + mono; ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.fillText("NO CVSS", (l0 + l1) / 2, a.bottom + 6);
+      ctx.fillStyle = hexA(red, .07); ctx.fillRect(qx, a.top, a.right - qx, qy - a.top);
+      ctx.strokeStyle = hexA(red, .45); ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(qx, a.top); ctx.lineTo(qx, a.bottom); ctx.moveTo(a.left, qy); ctx.lineTo(a.right, qy); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = hexA(red, .85); ctx.font = "600 10px " + mono; ctx.textAlign = "right"; ctx.textBaseline = "top";
+      ctx.fillText("SEVERE + LIKELY", a.right - 6, a.top + 6);
+      ctx.restore();
+    }
+  };
+  if (chartVulnMatrixInst){
+    chartVulnMatrixInst.data.datasets = datasets;
+    chartVulnMatrixInst.options = options;
+    chartVulnMatrixInst.update();
+  } else {
+    chartVulnMatrixInst = new Chart(canvas, { type: "scatter", data: { datasets }, options, plugins: [quadrants] });
+  }
 }
 
 /* ---------------- IP reputation lookup (AbuseIPDB via /api/ip-check) ---------------- */
@@ -843,15 +971,35 @@ function renderKpis(){
   const rwApj = rw.filter(v => v.apj || v.cc === "IN").length;
   const kevWeek = (DATA.kev || []).filter(k => { const a = daysAgo(k.dateAdded); return a !== null && a <= 7; });
   const kevRw = kevWeek.filter(k => k.ransomware).length;
+  // Change vs the previous period of equal length — only when the stored data reaches back that far,
+  // otherwise it would report a fake drop. worker.js's dedupeVictims() sorts India first before the
+  // 400-victim cap, so India claims are only dropped once they alone exceed the cap; below that, the
+  // oldest India claim marks where India coverage starts. kev is capped at 100 the same way.
+  let rwIndiaDelta = null, kevDelta = null;
+  const indiaAll = rwVictims.filter(v => v.cc === "IN");
+  if (rwAnchor && indiaAll.length < 400){
+    const span = rangeDays * 86400000, cur = rwAnchor.getTime() - span, prev = cur - span;
+    const times = indiaAll.map(v => new Date(v.date).getTime()).filter(t => !isNaN(t));
+    if (times.length && Math.min(...times) <= prev){
+      const prevIndia = rwVictims.filter(v => { const t = new Date(v.date).getTime(); return v.cc === "IN" && t >= prev && t < cur; }).length;
+      rwIndiaDelta = [rwIndia - prevIndia, "vs previous " + rangeDays + " days"];
+    }
+  }
+  const kevAges = (DATA.kev || []).map(k => daysAgo(k.dateAdded)).filter(a => a !== null);
+  if (kevAges.length && Math.max(...kevAges) >= 14){
+    kevDelta = [kevWeek.length - kevAges.filter(a => a > 7 && a <= 14).length, "vs previous 7 days"];
+  }
+  // Neutral colour on purpose: more claims isn't "good" or "bad" in a way a green/red arrow would imply.
+  const deltaHtml = d => !d ? "" : '<div class="d">' + (d[0] > 0 ? "▲ " + d[0] : d[0] < 0 ? "▼ " + Math.abs(d[0]) : "No change") + " " + esc(d[1]) + "</div>";
   const epssHigh = vulnItems.filter(v => v.epss != null && v.epss >= 0.5).length;
-  const tile = (cls, label, value, small, sub) =>
+  const tile = (cls, label, value, small, sub, delta) =>
     '<div class="kpi ' + cls + '"><div class="l">' + (cls.includes("infocon") ? '<span class="dot" aria-hidden="true"></span>' : "") + esc(label) + "</div>" +
     '<div class="v">' + esc(String(value)) + (small ? "<small>" + esc(small) + "</small>" : "") + "</div>" +
-    '<div class="s">' + esc(sub) + "</div></div>";
+    '<div class="s">' + esc(sub) + "</div>" + deltaHtml(delta) + "</div>";
   el.innerHTML =
     tile("infocon lvl-" + level, "INFOCON", labelMap[level] || level, "", "SANS Internet Storm Center level") +
-    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ" + (rw.length > rwApj ? " · " + rw.length + " global" : ""), "Leak-site claims, last " + rangeDays + " days — unconfirmed") +
-    tile("", "KEV added", kevWeek.length, kevRw ? kevRw + " with ransomware use" : "", "CISA Known Exploited, last 7 days") +
+    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ" + (rw.length > rwApj ? " · " + rw.length + " global" : ""), "Leak-site claims, last " + rangeDays + " days — unconfirmed", rwIndiaDelta) +
+    tile("", "KEV added", kevWeek.length, kevRw ? kevRw + " with ransomware use" : "", "CISA Known Exploited, last 7 days", kevDelta) +
     tile("", "EPSS ≥ 50%", epssHigh, "/ " + vulnItems.length + " CVEs tracked", "Likely exploited within 30 days (FIRST.org)");
 }
 
@@ -1678,6 +1826,7 @@ function wireThemeToggle(){
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("apjti.theme", next); } catch (_){}
     syncThemeToggle();
+    if (chartVulnMatrixInst) renderVulnMatrix(visibleVulns()); // reads theme tokens
   });
   syncThemeToggle();
 }

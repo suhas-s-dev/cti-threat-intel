@@ -165,6 +165,11 @@
     </div>
   </div>
   <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Sourced from NVD (CVSS 7+), GitHub Security Advisories, and CISA's Known Exploited Vulnerabilities catalog — merged and deduped by CVE ID. EPSS (FIRST.org) scores each CVE's probability of exploitation in the next 30 days, independent of CVSS severity — use it alongside CVSS to triage "severe and likely" over "severe but unlikely." <span class="wafdot" aria-hidden="true">🛡</span> marks CVE classes (SQL injection, XSS, RCE, SSRF, path traversal, deserialization, and similar request-shape bugs) a WAF or virtual-patch rule can typically mitigate at the edge — verify against the specific advisory before relying on it as your only control.</p>
+  <div class="card elev-sm vuln-matrix">
+    <div class="card-kicker">Triage matrix <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· CVSS severity × EPSS exploitation likelihood · follows the filter and search above · click a point to open it in the table</span></div>
+    <div class="vuln-matrix-wrap"><canvas id="chartVulnMatrix" role="img" aria-label="Scatter plot of tracked CVEs by CVSS score and EPSS probability; CISA KEV entries in red"></canvas></div>
+    <div class="vuln-matrix-legend"><span><i class="lg-kev"></i>Exploited (CISA KEV)</span><span><i class="lg-trk"></i>Tracked</span><span>Left lane: no CVSS score yet (CISA KEV entries arrive without one)</span><span class="apj-eyebrow" id="vuln-matrix-note"></span></div>
+  </div>
   <div class="card table-wrap" style="padding:0">
     
     <div class="vuln-scroll">
