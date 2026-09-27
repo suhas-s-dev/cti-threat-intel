@@ -621,6 +621,18 @@ function dedupeItems(items){
   out.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   return out;
 }
+// Per-bucket retention caps for ransomware victims, applied by capVictims() after dedupe + the 365-day
+// cutoff. One shared 400 cap on the India-first sort used to let India + APJ claims fill every slot, so
+// every global claim — ~90% of ransomware.live's feed — was discarded each cycle and the "Global"/"All"
+// views, world map and group/sector charts silently showed APJ only. Separate caps keep India priority
+// without starving the rest. public/app.js's RW_INDIA_CAP mirrors .india — keep them in sync.
+const VICTIM_CAPS = { india: 300, apj: 300, global: 600 };
+function victimBucket(v){ return v.cc === "IN" ? "india" : (v.apj ? "apj" : "global"); }
+// Input is dedupeVictims() output (India, then APJ, then date desc), so each bucket keeps its newest.
+function capVictims(victims, caps = VICTIM_CAPS){
+  const n = { india: 0, apj: 0, global: 0 };
+  return victims.filter(v => { const b = victimBucket(v); return ++n[b] <= caps[b]; });
+}
 function dedupeVictims(victims){
   const seen = new Set(), out = [];
   for (const v of victims){
@@ -1006,12 +1018,19 @@ async function collect(env){
     })());
   }
 
-  tasks.push((async () => {
-    try { victims.push(...parseRwJson(await fetchJson(RW_RECENT))); } catch (e){ /* keep going */ }
-  })());
-  tasks.push((async () => {
-    try { victims.push(...parseRwJson(await fetchJson(RW_INDIA), "IN")); } catch (e){ /* keep going */ }
-  })());
+  // Recorded in sourceStatus like every other source — these used to fail silently, and the frontend's
+  // stored-claim count kept reporting ransomware.live as healthy regardless.
+  for (const [name, url, cc] of [["ransomware.live · recent", RW_RECENT, undefined], ["ransomware.live · India", RW_INDIA, "IN"]]){
+    tasks.push((async () => {
+      try {
+        const parsed = parseRwJson(await fetchJson(url), cc);
+        victims.push(...parsed);
+        sourceStatus[name] = { ok: true, count: parsed.length };
+      } catch (e){
+        sourceStatus[name] = { ok: false, error: String(e.message || e) };
+      }
+    })());
+  }
 
   await Promise.all(tasks);
 
@@ -1020,7 +1039,7 @@ async function collect(env){
 
   const cutoff = Date.now() - 365 * 86400000;
   const mergedItems = dedupeItems([...items, ...prev.items]).filter(i => !i.date || new Date(i.date).getTime() >= cutoff).slice(0, ITEMS_CAP);
-  const mergedVictims = dedupeVictims([...victims, ...prev.victims]).filter(v => !v.date || new Date(v.date).getTime() >= cutoff).slice(0, 400);
+  const mergedVictims = capVictims(dedupeVictims([...victims, ...prev.victims]).filter(v => !v.date || new Date(v.date).getTime() >= cutoff));
   const mergedKev = dedupeKev([...kev, ...(prev.kev || [])]).filter(k => !k.dateAdded || new Date(k.dateAdded).getTime() >= cutoff).slice(0, 100);
   const mergedIocs = dedupeIocs([...iocs, ...(prev.iocs || [])]).filter(i => !i.firstSeen || new Date(i.firstSeen).getTime() >= cutoff).slice(0, 500);
   // Drop archived posts from channels that have since been removed from TELEGRAM_CHANNELS (e.g.
@@ -1314,7 +1333,7 @@ function json(obj, status){
 }
 
 // Named exports are unused by the Worker runtime but make these functions easy to unit test.
-export { decode, tag, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, collectDdosTelemetry, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
+export { decode, tag, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, collectDdosTelemetry, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
 
 export default {
   async fetch(request, env, ctx){

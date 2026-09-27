@@ -295,6 +295,9 @@ async function loadData(){
   const tileHtml = (name, ok, detail, title) =>
     '<span class="srcpill ' + (ok ? "ok" : "fail") + '"' + (title ? ' title="' + esc(title) + '"' : "") + "><b>" + esc(name) + "</b><small>" + esc(detail) + "</small></span>";
   const failed = statusEntries.filter(([, s]) => !s.ok);
+  // Newer collections record the two ransomware.live fetches themselves; older blobs don't, so fall
+  // back to a tile derived from the stored claim count.
+  const hasRwStatus = statusEntries.some(([name]) => name.startsWith("ransomware.live"));
   const fresh = [
     json.generated ? "Full collection " + relTime(json.generated) + " (every 30 min)" : "",
     json.vulnGenerated ? "CVE + RSS rotation " + relTime(json.vulnGenerated) + " (every 10 min)" : ""
@@ -302,9 +305,9 @@ async function loadData(){
   $("#srcbar").innerHTML = (fresh ? '<div class="src-fresh">' + esc(fresh) + "</div>" : "") +
     [...failed, ...statusEntries.filter(([, s]) => s.ok)].map(([name, s]) =>
       tileHtml(name, s.ok, s.ok ? s.count + " items" : (String(s.error || "unavailable").slice(0, 40)), s.ok ? name : name + " — " + (s.error || "unavailable"))
-    ).join("") + tileHtml("ransomware.live", !!rwVictims.length, rwVictims.length + " claims");
-  const okCount = statusEntries.filter(([,s]) => s.ok).length + (rwVictims.length ? 1 : 0);
-  const totalCount = statusEntries.length + 1;
+    ).join("") + (hasRwStatus ? "" : tileHtml("ransomware.live", !!rwVictims.length, rwVictims.length + " claims stored"));
+  const okCount = statusEntries.filter(([,s]) => s.ok).length + (hasRwStatus ? 0 : (rwVictims.length ? 1 : 0));
+  const totalCount = statusEntries.length + (hasRwStatus ? 0 : 1);
   const srcSummary = $("#srcsummary");
   if (srcSummary) srcSummary.textContent = "Sources · " + okCount + "/" + totalCount + " ok";
   // Colour of the summary dot: all ok / a few down / a quarter or more down.
@@ -757,6 +760,7 @@ function laneX(id){
   return MATRIX_LANE[0] + 0.15 + (h % 1000) / 1000 * (MATRIX_LANE[1] - MATRIX_LANE[0] - 0.3);
 }
 let chartVulnMatrixInst = null;
+const RW_INDIA_CAP = 300; // = VICTIM_CAPS.india in src/worker.js
 // Read from <html>, not <body>: body.map-mode forces the dark tokens while the Map tab is open, and the
 // matrix can re-render then (5-min poll, theme toggle) — it would keep dark colours in light theme.
 function cssToken(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -994,12 +998,12 @@ function renderKpis(){
   const kevWeek = (DATA.kev || []).filter(k => { const a = daysAgo(k.dateAdded); return a !== null && a <= 7; });
   const kevRw = kevWeek.filter(k => k.ransomware).length;
   // Change vs the previous period of equal length — only when the stored data reaches back that far,
-  // otherwise it would report a fake drop. worker.js's dedupeVictims() sorts India first before the
-  // 400-victim cap, so India claims are only dropped once they alone exceed the cap; below that, the
-  // oldest India claim marks where India coverage starts. kev is capped at 100 the same way.
+  // otherwise it would report a fake drop. worker.js keeps India claims in their own capped bucket
+  // (VICTIM_CAPS.india), newest first, so below the cap the oldest India claim marks where India
+  // coverage starts. kev is capped at 100 the same way.
   let rwIndiaDelta = null, kevDelta = null;
   const indiaAll = rwVictims.filter(v => v.cc === "IN");
-  if (rwAnchor && indiaAll.length < 400){
+  if (rwAnchor && indiaAll.length < RW_INDIA_CAP){
     const span = rangeDays * 86400000, cur = rwAnchor.getTime() - span, prev = cur - span;
     const times = indiaAll.map(v => new Date(v.date).getTime()).filter(t => !isNaN(t));
     if (times.length && Math.min(...times) <= prev){
