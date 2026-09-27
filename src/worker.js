@@ -1064,10 +1064,17 @@ async function collect(env){
   ]).slice(0, 400);
   const enrichedVulnerabilities = await enrichEpss(mergedVulnerabilities, sourceStatus);
 
+  // RSS feeds are fetched by the 10-min job, not here — carry their last status (and that job's
+  // timestamp) forward so each full cycle doesn't blank them. Without this the source-health badge
+  // flipped between ~19 and ~32 sources and the "CVE + RSS rotation" freshness line vanished for up to
+  // 10 min after every collect(). Only feeds still in SOURCES carry over, so a removed feed drops out.
+  const rssNames = new Set(SOURCES.map(src => src.name));
+  const carriedRss = Object.fromEntries(Object.entries(prev.sourceStatus || {}).filter(([name]) => rssNames.has(name)));
   const data = {
     generated: nowIso,
+    vulnGenerated: prev.vulnGenerated || null,
     infocon: infocon || prev.infocon || "green",
-    sourceStatus,
+    sourceStatus: Object.assign(carriedRss, sourceStatus),
     items: mergedItems,
     victims: mergedVictims,
     kev: mergedKev,
