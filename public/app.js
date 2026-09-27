@@ -774,6 +774,16 @@ function renderVulnMatrix(list){
     x: v.cvssScore != null ? v.cvssScore : laneX(v.cveId), y: Math.max(EPSS_MIN, v.epss), v
   }));
   const hot = pts.filter(p => p.v.cvssScore != null && p.x >= MATRIX_CVSS_LINE && p.v.epss >= MATRIX_EPSS_LINE).length;
+  // Fit the CVSS axis to the data: the lane only when something is in it, and start one point below the
+  // lowest score (production is NVD CVSS 7+ only, so a fixed 0–10 axis squeezed every point into the
+  // right third). Never start above the CVSS 9 guide, so the severe corner is always on screen.
+  const hasLane = pts.some(p => p.v.cvssScore == null);
+  const scored = pts.filter(p => p.v.cvssScore != null).map(p => p.x);
+  const cvssFloor = scored.length ? Math.max(0, Math.min(MATRIX_CVSS_LINE - 1, Math.floor(Math.min(...scored)) - 1)) : 0;
+  // Lane width scales with the visible CVSS span so it stays about 15% of the plot.
+  const laneW = (10 - cvssFloor) * 0.16;
+  const lane = [cvssFloor - laneW - 0.2, cvssFloor - 0.2];
+  if (hasLane) pts.forEach(p => { if (p.v.cvssScore == null) p.x = lane[0] + (p.x - MATRIX_LANE[0]) / (MATRIX_LANE[1] - MATRIX_LANE[0]) * laneW; });
   const laneHot = pts.filter(p => p.v.cvssScore == null && p.v.epss >= MATRIX_EPSS_LINE).length;
   if (note) note.textContent = pts.length
     ? pts.length + " plotted of " + list.length + " in view (needs an EPSS score) · " + hot + " in the severe-and-likely corner" +
@@ -803,8 +813,8 @@ function renderVulnMatrix(list){
       }
     },
     scales: {
-      x: { min: MATRIX_LANE[0], max: 10, title: { display: true, text: "CVSS severity →", color: muted, font: { family: mono, size: 10 } },
-        afterBuildTicks: ax => { ax.ticks = Array.from({ length: 11 }, (_, i) => ({ value: i })); },
+      x: { min: hasLane ? lane[0] : cvssFloor, max: 10, title: { display: true, text: "CVSS severity →", color: muted, font: { family: mono, size: 10 } },
+        afterBuildTicks: ax => { ax.ticks = Array.from({ length: 11 - cvssFloor }, (_, i) => ({ value: cvssFloor + i })); },
         ticks: { ...tick }, grid: { color: hexA(line, .6) }, border: { display: false } },
       y: { type: "logarithmic", min: EPSS_MIN, max: 1, title: { display: true, text: "EPSS exploitation probability →", color: muted, font: { family: mono, size: 10 } },
         ticks: { ...tick, callback: val => [0.0001, 0.001, 0.01, 0.1, 1].includes(val) ? (val * 100) + "%" : null }, grid: { color: hexA(line, .6) }, border: { display: false } }
@@ -820,17 +830,24 @@ function renderVulnMatrix(list){
       renderVulnerabilities();
     }
   };
-  // Quadrant guides: CVSS 9 / EPSS 10%, with the severe-and-likely corner shaded.
+  // Quadrant guides: CVSS 9 / EPSS 10%, with the severe-and-likely corner shaded. The plugin is bound
+  // once at chart creation, so per-render values (theme colours, lane position) are read from
+  // chart.$matrix rather than closed over — a closure would keep the first render's theme and lane.
+  const matrixState = { hasLane, lane, red, muted, mono };
   const quadrants = {
     id: "vulnQuadrants",
     beforeDatasetsDraw(chart){
+      if (!chart.$matrix) return; // first draw happens inside new Chart(), before $matrix is attached
+      const { hasLane, lane, red, muted, mono } = chart.$matrix;
       const { ctx, chartArea: a, scales: { x, y } } = chart;
       const qx = x.getPixelForValue(MATRIX_CVSS_LINE), qy = y.getPixelForValue(MATRIX_EPSS_LINE);
-      const l0 = x.getPixelForValue(MATRIX_LANE[0]), l1 = x.getPixelForValue(MATRIX_LANE[1]);
       ctx.save();
-      ctx.fillStyle = hexA(muted, .08); ctx.fillRect(l0, a.top, l1 - l0, a.bottom - a.top);
-      ctx.fillStyle = muted; ctx.font = "600 9.5px " + mono; ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.fillText("NO CVSS", (l0 + l1) / 2, a.bottom + 6);
+      if (hasLane){
+        const l0 = x.getPixelForValue(lane[0]), l1 = x.getPixelForValue(lane[1]);
+        ctx.fillStyle = hexA(muted, .08); ctx.fillRect(l0, a.top, l1 - l0, a.bottom - a.top);
+        ctx.fillStyle = muted; ctx.font = "600 9.5px " + mono; ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText("NO CVSS", (l0 + l1) / 2, a.bottom + 6);
+      }
       ctx.fillStyle = hexA(red, .07); ctx.fillRect(qx, a.top, a.right - qx, qy - a.top);
       ctx.strokeStyle = hexA(red, .45); ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(qx, a.top); ctx.lineTo(qx, a.bottom); ctx.moveTo(a.left, qy); ctx.lineTo(a.right, qy); ctx.stroke();
@@ -840,11 +857,14 @@ function renderVulnMatrix(list){
     }
   };
   if (chartVulnMatrixInst){
+    chartVulnMatrixInst.$matrix = matrixState;
     chartVulnMatrixInst.data.datasets = datasets;
     chartVulnMatrixInst.options = options;
     chartVulnMatrixInst.update();
   } else {
     chartVulnMatrixInst = new Chart(canvas, { type: "scatter", data: { datasets }, options, plugins: [quadrants] });
+    chartVulnMatrixInst.$matrix = matrixState;
+    chartVulnMatrixInst.update();
   }
 }
 
