@@ -294,7 +294,11 @@ async function loadData(){
   const okCount = statusEntries.filter(([,s]) => s.ok).length + (rwVictims.length ? 1 : 0);
   const totalCount = statusEntries.length + 1;
   const srcSummary = $("#srcsummary");
-  if (srcSummary) srcSummary.textContent = "Source health · " + okCount + "/" + totalCount + " ok";
+  if (srcSummary) srcSummary.textContent = "Sources · " + okCount + "/" + totalCount + " ok";
+  // Colour of the summary dot: all ok / a few down / a quarter or more down.
+  const srcDetails = srcSummary && srcSummary.closest(".src-details");
+  const failCount = totalCount - okCount;
+  if (srcDetails) srcDetails.dataset.health = !failCount ? "ok" : (failCount / totalCount < 0.25 ? "warn" : "bad");
 
   if (json.note) showError(json.note);
   else $("#err-banner").classList.remove("show");
@@ -363,8 +367,7 @@ function renderRansomwareNews(){
     return;
   }
   el.innerHTML = items.slice(0, 20).map(i =>
-    '<div class="card blueprint elev-sm feed-card">' +
-      '<i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>' +
+    '<div class="card elev-sm feed-card">' +
       '<div class="feed-card-tags">' +
         '<span class="tag tag-neutral">' + esc(i.src) + "</span>" +
         (i.india || i.apj ? '<span class="tag ' + regionTagClass(i.india, i.apj) + '">' + (i.india ? "India P1" : "APJ") + "</span>" : "") +
@@ -400,8 +403,7 @@ function renderTelegram(){
     return;
   }
   el.innerHTML = items.map(i =>
-    '<div class="card blueprint elev-sm feed-card">' +
-      '<i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>' +
+    '<div class="card elev-sm feed-card">' +
       '<div class="feed-card-tags">' +
         '<span class="tag tag-neutral">' + esc(i.channel) + "</span>" +
         (i.india || i.apj ? '<span class="tag ' + regionTagClass(i.india, i.apj) + '">' + (i.india ? "India P1" : "APJ") + "</span>" : "") +
@@ -438,8 +440,7 @@ function renderActors(){
   document.querySelectorAll("[data-af]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.af === actorFilter)));
   CURRENT_ACTORS = list;
   $("#actors-list").innerHTML = list.map((a, idx) =>
-    '<div class="card blueprint elev-sm actor-card" data-i="' + idx + '">' +
-      '<i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>' +
+    '<div class="card elev-sm actor-card" data-i="' + idx + '">' +
       '<div class="actor-hd">' +
         "<div><div class=\"card-title\">" + esc(a.name) + '</div><div class="aka">' + esc(a.aka) + "</div></div>" +
         '<span class="tag ' + (a.region === "global" ? "tag-neutral" : (a.p === "P1" ? "tag-accent" : "tag-outline")) + '">' + (a.region === "global" ? "Global" : (a.p || "APJ")) + "</span>" +
@@ -647,6 +648,7 @@ function daysAgo(dateStr){
 function renderKev(){
   const el = $("#kev-list");
   if (!el) return;
+  el.classList.remove("bempty"); // the "Loading…" placeholder style; would otherwise italicise every row
   const list = (DATA.kev || []).slice(0, 6);
   if (!list.length){ el.innerHTML = '<div class="bempty">No new CISA KEV entries in this collection cycle.</div>'; return; }
   el.innerHTML = list.map(k => {
@@ -827,14 +829,30 @@ function renderTopTtps(){
   ).join("");
 }
 
-/* ---------------- Rendering: hero INFOCON ---------------- */
-function renderHeroInfocon(){
+/* ---------------- Rendering: header KPI row ---------------- */
+// Four headline numbers shown above every tab except Map (which has its own KPI strip). All derived
+// from the /api/data payload; the ransomware count follows the header time window like renderSnapshot().
+function renderKpis(){
+  const el = $("#kpis");
+  if (!el) return;
   const level = String(DATA.infocon || "green").toLowerCase();
-  const labelMap = { green: "LOW", yellow: "ELEVATED", orange: "HIGH", red: "SEVERE" };
-  const tagEl = $("#hero-infocon");
-  if (!tagEl) return;
-  tagEl.className = "tag tag-outline infocon-tag lvl-" + level;
-  $("#hero-infocon-text").textContent = "INFOCON: " + (labelMap[level] || level.toUpperCase());
+  const labelMap = { green: "Low", yellow: "Elevated", orange: "High", red: "Severe" };
+  const rwAnchor = maxDate(rwVictims.map(v => v.date));
+  const rw = rwAnchor ? rwVictims.filter(v => inWindow(v.date, rwAnchor.getTime())) : rwVictims;
+  const rwIndia = rw.filter(v => v.cc === "IN").length;
+  const rwApj = rw.filter(v => v.apj || v.cc === "IN").length;
+  const kevWeek = (DATA.kev || []).filter(k => { const a = daysAgo(k.dateAdded); return a !== null && a <= 7; });
+  const kevRw = kevWeek.filter(k => k.ransomware).length;
+  const epssHigh = vulnItems.filter(v => v.epss != null && v.epss >= 0.5).length;
+  const tile = (cls, label, value, small, sub) =>
+    '<div class="kpi ' + cls + '"><div class="l">' + (cls.includes("infocon") ? '<span class="dot" aria-hidden="true"></span>' : "") + esc(label) + "</div>" +
+    '<div class="v">' + esc(String(value)) + (small ? "<small>" + esc(small) + "</small>" : "") + "</div>" +
+    '<div class="s">' + esc(sub) + "</div></div>";
+  el.innerHTML =
+    tile("infocon lvl-" + level, "INFOCON", labelMap[level] || level, "", "SANS Internet Storm Center level") +
+    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ · " + rw.length + " global", "Leak-site claims, last " + rangeDays + " days — unconfirmed") +
+    tile("", "KEV added", kevWeek.length, kevRw ? kevRw + " with ransomware use" : "", "CISA Known Exploited, last 7 days") +
+    tile("", "EPSS ≥ 50%", epssHigh, "/ " + vulnItems.length + " CVEs tracked", "Likely exploited within 30 days (FIRST.org)");
 }
 
 /* ---------------- Rendering: daily brief ---------------- */
@@ -1166,7 +1184,7 @@ function renderDotLayer(g, dpr){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, g.w, g.h);
   // graticule
-  ctx.strokeStyle = "rgba(233,228,220,.045)"; ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(234,241,246,.045)"; ctx.lineWidth = 1;
   ctx.beginPath();
   for (let lon = -180; lon <= 360; lon += 30){ const x = toXY(0, lon, g).x; if (x >= 0 && x <= g.w){ ctx.moveTo(x, 0); ctx.lineTo(x, g.h); } }
   for (let lat = -60; lat <= 90; lat += 30){ const y = toXY(lat, 0, g).y; if (y >= 0 && y <= g.h){ ctx.moveTo(0, y); ctx.lineTo(g.w, y); } }
@@ -1175,7 +1193,7 @@ function renderDotLayer(g, dpr){
   const styles = maskCountries.map(c => {
     const n = c.cc ? (mapScene.counts[c.cc] || 0) : 0;
     const hover = mapHover && c.cc === mapHover, focus = mapScene.focus && c.cc === mapScene.focus;
-    if (!n) return hover ? "rgba(233,228,220,.5)" : "rgba(170,160,146,.24)";
+    if (!n) return hover ? "rgba(234,241,246,.5)" : "rgba(142,160,177,.22)";
     const t = Math.log1p(n) / Math.log1p(mapScene.max);
     return rgba(MAP_COLORS[ccCategory(c.cc)], (focus || hover) ? 1 : (0.34 + 0.6 * t).toFixed(2));
   });
@@ -1186,7 +1204,7 @@ function renderDotLayer(g, dpr){
       const ll = toLatLon(x, y, g);
       const id = maskAt(ll.lat, ll.lon);
       if (!id) continue;
-      const st = id === 65535 ? "rgba(170,160,146,.24)" : styles[id - 1];
+      const st = id === 65535 ? "rgba(142,160,177,.22)" : styles[id - 1];
       if (st !== last){ ctx.fillStyle = st; last = st; }
       ctx.fillRect(x - size / 2, y - size / 2, size, size);
     }
@@ -1255,7 +1273,7 @@ function drawMap(ts){
   }
 
   // pings: core dot + two sonar rings sized by claim volume
-  ctx.font = "500 10px 'Martian Mono', ui-monospace, monospace";
+  ctx.font = "500 10px 'IBM Plex Mono', ui-monospace, monospace";
   ctx.textBaseline = "middle";
   for (const pg of mapScene.pings){
     const q = toXY(pg.lat, pg.lon, g);
@@ -1271,17 +1289,17 @@ function drawMap(ts){
     grad.addColorStop(0, rgba(col, 0.45)); grad.addColorStop(1, rgba(col, 0));
     ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(q.x, q.y, r * 2.4, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = rgba(col, 1); ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(255,248,238,.9)"; ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1.2, r * 0.32), 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(246,250,253,.9)"; ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1.2, r * 0.32), 0, Math.PI * 2); ctx.fill();
     if (pg.cc === mapScene.focus || pg.cc === mapHover){
-      ctx.beginPath(); ctx.arc(q.x, q.y, r + 5, 0, Math.PI * 2); ctx.strokeStyle = "#fff8ee"; ctx.lineWidth = 1.3; ctx.stroke();
+      ctx.beginPath(); ctx.arc(q.x, q.y, r + 5, 0, Math.PI * 2); ctx.strokeStyle = "#f6fafd"; ctx.lineWidth = 1.3; ctx.stroke();
     }
     if (pg.label || pg.cc === mapHover){
       const label = ccName(pg.cc).toUpperCase() + "  " + pg.n;
-      ctx.fillStyle = "rgba(10,11,13,.72)";
+      ctx.fillStyle = "rgba(10,15,20,.72)";
       const tw = ctx.measureText(label).width;
       ctx.fillRect(q.x + r + 6, q.y - 8, tw + 10, 16);
       ctx.fillStyle = rgba(col, 1); ctx.fillRect(q.x + r + 6, q.y - 8, 2, 16);
-      ctx.fillStyle = "#e9e4dc"; ctx.fillText(label, q.x + r + 12, q.y + 0.5);
+      ctx.fillStyle = "#eaf1f6"; ctx.fillText(label, q.x + r + 12, q.y + 0.5);
     }
   }
 
@@ -1305,9 +1323,9 @@ function drawMap(ts){
       const alpha = k < 0.12 ? k / 0.12 : (k > 0.8 ? (1 - k) / 0.2 : 1);
       const l1 = String(v.group || "").toUpperCase() + "  ▸  " + String(v.victim || "").slice(0, 34);
       const l2 = ccName(v.cc) + (v.sector ? " · " + v.sector : "") + " · " + String(v.date || "").slice(0, 10);
-      ctx.font = "600 10.5px 'Martian Mono', ui-monospace, monospace";
+      ctx.font = "600 10.5px 'IBM Plex Mono', ui-monospace, monospace";
       const w1 = ctx.measureText(l1).width;
-      ctx.font = "400 9.5px 'Martian Mono', ui-monospace, monospace";
+      ctx.font = "400 9.5px 'IBM Plex Mono', ui-monospace, monospace";
       const bw = Math.max(w1, ctx.measureText(l2).width) + 20, bh = 38;
       let bx = q.x + 18, by = q.y - 46 - (1 - Math.min(1, k * 6)) * 6;
       if (bx + bw > g.w - 8) bx = q.x - 18 - bw;
@@ -1315,11 +1333,11 @@ function drawMap(ts){
       ctx.globalAlpha = alpha;
       ctx.strokeStyle = rgba(col, 0.7); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(q.x, q.y); ctx.lineTo(bx < q.x ? bx + bw : bx, by + bh / 2); ctx.stroke();
-      ctx.fillStyle = "rgba(12,13,16,.92)"; ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = "rgba(13,21,28,.92)"; ctx.fillRect(bx, by, bw, bh);
       ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
       ctx.fillStyle = rgba(col, 1); ctx.fillRect(bx, by, 3, bh);
-      ctx.font = "600 10.5px 'Martian Mono', ui-monospace, monospace"; ctx.fillStyle = "#fff8ee"; ctx.fillText(l1, bx + 11, by + 13);
-      ctx.font = "400 9.5px 'Martian Mono', ui-monospace, monospace"; ctx.fillStyle = "#8b8680"; ctx.fillText(l2, bx + 11, by + 27);
+      ctx.font = "600 10.5px 'IBM Plex Mono', ui-monospace, monospace"; ctx.fillStyle = "#f6fafd"; ctx.fillText(l1, bx + 11, by + 13);
+      ctx.font = "400 9.5px 'IBM Plex Mono', ui-monospace, monospace"; ctx.fillStyle = "#8ea0b1"; ctx.fillText(l2, bx + 11, by + 27);
       ctx.globalAlpha = 1;
     }
   }
@@ -1548,7 +1566,7 @@ function buildDashboard(){
   renderDashStats(currentRegion, focus);
   renderDdosTelemetry();
   renderBanner();
-  renderHeroInfocon();
+  renderKpis();
   document.querySelectorAll(".dg-rtab").forEach(t => t.classList.toggle("active", !focus && t.dataset.region === currentRegion));
 
   $("#dg-updated").textContent = rwVictims.length + " leak-site claims tracked · latest " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a");
@@ -1570,11 +1588,11 @@ function buildDashboard(){
   const topSectors = Object.entries(bySector).sort((a,b) => b[1]-a[1]).slice(0, 8);
 
   if (typeof Chart === "undefined") return;
-  const mono = "'Martian Mono', ui-monospace, monospace";
-  const gridColor = "rgba(233,228,220,.06)";
-  const tick = { color: "#8b8680", font: { size: 10, family: mono } };
-  const tooltip = { backgroundColor: "#0c0d10", borderColor: "#2a2f37", borderWidth: 1, titleColor: "#e9e4dc", bodyColor: "#c9c3b9",
-    titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 10.5 }, padding: 10, cornerRadius: 0, boxPadding: 4 };
+  const mono = "'IBM Plex Mono', ui-monospace, monospace";
+  const gridColor = "rgba(234,241,246,.06)";
+  const tick = { color: "#8ea0b1", font: { size: 10, family: mono } };
+  const tooltip = { backgroundColor: "#0d151c", borderColor: "#2c3e4f", borderWidth: 1, titleColor: "#eaf1f6", bodyColor: "#c3d0db",
+    titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 10.5 }, padding: 10, cornerRadius: 8, boxPadding: 4 };
   const fade = (ctx, hex) => {
     const area = ctx.chart.chartArea;
     if (!area) return hex + "33";
@@ -1597,7 +1615,7 @@ function buildDashboard(){
         interaction: { mode: "index", intersect: false },
         plugins: { legend: { display: false }, tooltip },
         scales: {
-          x: { ticks: { ...tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false }, border: { color: "#2a2f37" } },
+          x: { ticks: { ...tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false }, border: { color: "#2c3e4f" } },
           y: { beginAtZero: true, ticks: { ...tick, precision: 0, maxTicksLimit: 5 }, grid: { color: gridColor }, border: { display: false } }
         }
       }
@@ -1618,7 +1636,7 @@ function buildDashboard(){
         plugins: { legend: { display: false }, tooltip },
         scales: {
           x: { beginAtZero: true, ticks: { ...tick, precision: 0, maxTicksLimit: 5 }, grid: { color: gridColor }, border: { display: false } },
-          y: { ticks: { ...tick, color: "#c9c3b9" }, grid: { display: false }, border: { color: "#2a2f37" } }
+          y: { ticks: { ...tick, color: "#c3d0db" }, grid: { display: false }, border: { color: "#2c3e4f" } }
         }
       }
     });
@@ -1626,8 +1644,8 @@ function buildDashboard(){
   const ctxG = document.getElementById("chartGroups");
   if (ctxG) chartGroupsInst = hbar(ctxG, chartGroupsInst, topGroups, i => ARC_PALETTE[i % ARC_PALETTE.length]);
   const ctxS = document.getElementById("chartSectors");
-  if (ctxS) chartSectorsInst = hbar(ctxS, chartSectorsInst, topSectors, i => i === 0 ? "#ff5b3a" : (i < 3 ? "#ffb454" : "#8a847a"));
-  // Chart.js measures axis labels at creation; if Martian Mono arrives afterwards the wider glyphs
+  if (ctxS) chartSectorsInst = hbar(ctxS, chartSectorsInst, topSectors, i => i === 0 ? "#ff5b3a" : (i < 3 ? "#ffb454" : "#6f8294"));
+  // Chart.js measures axis labels at creation; if IBM Plex Mono arrives afterwards the wider glyphs
   // overflow the reserved gutter and get clipped — re-layout once web fonts are ready.
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => [chartTrendInst, chartGroupsInst, chartSectorsInst].forEach(c => c && c.update()));
 }
@@ -1650,7 +1668,7 @@ function syncThemeToggle(){
   btn.setAttribute("aria-label", label);
   btn.title = label;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = (dark || onMap) ? "#0a0b0d" : "#f2f2f3";
+  if (meta) meta.content = (dark || onMap) ? "#0a0f14" : "#f4f6f8";
 }
 function wireThemeToggle(){
   const btn = $("#theme-toggle");

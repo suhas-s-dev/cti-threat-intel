@@ -16,7 +16,10 @@
     document.documentElement.setAttribute("data-theme", t);
   })();
 </script>
-<meta name="theme-color" content="#0a0b0d">
+<meta name="theme-color" content="#0a0f14">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="styles.css">
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js" integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
@@ -24,7 +27,7 @@
 <body>
 
 <nav class="nav">
-  <span class="nav-brand">Threat Intel</span>
+  <span class="nav-brand"><span class="nav-logo" aria-hidden="true">CTI</span>Threat Intel</span>
   <div class="nav-links" id="nav-links">
     <a href="#brief">Brief</a>
     <a href="#ransomware">Ransomware</a>
@@ -38,7 +41,7 @@
     <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>
     <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
   </button>
-  <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief</button>
+  <button type="button" class="btn btn-primary" data-action="download-brief">Download brief</button>
   <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation menu"><span></span><span></span><span></span></button>
 </nav>
 
@@ -52,20 +55,27 @@
   <div class="err-banner" id="err-banner"></div>
 </div>
 
-<header class="section" style="padding-top:var(--space-6)">
-  <div class="apj-eyebrow" data-only-tabs="brief" style="margin-bottom:var(--space-3)">Open-source collection · DDoS / AppSec lens · MITRE ATT&amp;CK mapped</div>
-  <div style="display:flex; align-items:center; gap:var(--space-4); flex-wrap:wrap; margin-bottom:var(--space-6)">
-    <div class="apj-seg" role="radiogroup" aria-label="Window">
-      <button type="button" data-t="7" aria-pressed="false">7 days</button>
-      <button type="button" data-t="30" aria-pressed="false">30 days</button>
-      <button type="button" data-t="90" aria-pressed="false">3 months</button>
-      <button type="button" data-t="180" aria-pressed="false">6 months</button>
-      <button type="button" data-t="365" aria-pressed="false">1 year</button>
+<header class="section" style="padding-top:var(--space-5); padding-bottom:var(--space-4)">
+  <div class="page-head">
+    <div data-only-tabs="brief ransomware vulnerabilities telegram actors iocs">
+      <div class="apj-num">India-first · APJ · Global</div>
+      <h1 data-only-tabs="brief">Signals worth triaging</h1>
+      <p data-only-tabs="brief">Open-source collection · DDoS / AppSec lens · MITRE ATT&amp;CK mapped. Leak-site and social claims are shown as claims, not confirmed incidents.</p>
     </div>
-    <span class="tag tag-outline infocon-tag" id="hero-infocon"><span class="dot"></span><span id="hero-infocon-text">INFOCON: —</span></span>
+    <div class="window-ctl">
+      <span class="apj-eyebrow" id="window-label">Window · ransomware, Telegram, snapshot, trend</span>
+      <div class="apj-seg" role="radiogroup" aria-labelledby="window-label">
+        <button type="button" data-t="7" aria-pressed="false">7 days</button>
+        <button type="button" data-t="30" aria-pressed="false">30 days</button>
+        <button type="button" data-t="90" aria-pressed="false">3 months</button>
+        <button type="button" data-t="180" aria-pressed="false">6 months</button>
+        <button type="button" data-t="365" aria-pressed="false">1 year</button>
+      </div>
+    </div>
   </div>
-  <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center">
-    <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief as Markdown</button>
+  <div class="kpis" id="kpis" data-only-tabs="brief ransomware vulnerabilities telegram actors iocs" aria-label="Key metrics"></div>
+  <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center; margin-top:var(--space-5)">
+    <button type="button" class="btn btn-primary" data-action="download-brief">Download brief as Markdown</button>
     <span class="copy-status"></span>
   </div>
 </header>
@@ -80,24 +90,20 @@
     <span class="apj-eyebrow">India first, then global · assessed from collected data, not confirmed</span>
   </div>
   <div class="grid-2-1">
-    <div class="card blueprint elev-md" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="card elev-md" style="padding:var(--space-6)">
       <div class="card-kicker" id="brief-date">—</div>
       <div id="brief-text" class="placeholder">Loading…</div>
     </div>
     <div style="display:flex; flex-direction:column; gap:var(--space-4)">
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Signal snapshot</div>
         <div id="snapshot"></div>
       </div>
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Critical vulnerabilities <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· CISA KEV, added this week</span></div>
         <div id="kev-list" class="bempty">Loading…</div>
       </div>
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Top TTPs observed <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· curated actor profiles</span></div>
         <div id="top-ttps"></div>
       </div>
@@ -121,8 +127,8 @@
       <select id="sector-filter" class="input" style="max-width:190px"><option value="all">All industries</option></select>
     </div>
   </div>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card table-wrap" style="padding:0">
+    
     <table class="table">
       <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Region</th><th>Claimed</th><th>Status</th></tr></thead>
       <tbody id="rw"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
@@ -159,8 +165,8 @@
     </div>
   </div>
   <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Sourced from NVD (CVSS 7+), GitHub Security Advisories, and CISA's Known Exploited Vulnerabilities catalog — merged and deduped by CVE ID. EPSS (FIRST.org) scores each CVE's probability of exploitation in the next 30 days, independent of CVSS severity — use it alongside CVSS to triage "severe and likely" over "severe but unlikely." <span class="wafdot" aria-hidden="true">🛡</span> marks CVE classes (SQL injection, XSS, RCE, SSRF, path traversal, deserialization, and similar request-shape bugs) a WAF or virtual-patch rule can typically mitigate at the edge — verify against the specific advisory before relying on it as your only control.</p>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card table-wrap" style="padding:0">
+    
     <div class="vuln-scroll">
       <table class="table vuln-table">
         <colgroup>
@@ -232,13 +238,12 @@
     </div>
   </div>
   <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Maps each vendor's name for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0). Checked daily for edits. The sheet itself warns that attribution is complex and its mappings are best-effort — and it has had few additions since 2024, so treat it as an alias reference, not current activity. Click a row for operations, malware, and sources.</p>
-  <div class="card blueprint elev-sm" style="padding:var(--space-5);margin-bottom:var(--space-4)">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card elev-sm" style="padding:var(--space-5);margin-bottom:var(--space-4)">
     <div class="card-kicker">Recent sheet changes</div>
     <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
   </div>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card table-wrap" style="padding:0">
+    
     <div class="vuln-scroll">
       <table class="table vuln-table apt-table">
         <colgroup><col style="width:20%"><col style="width:11%"><col style="width:37%"><col style="width:8%"><col style="width:24%"></colgroup>
@@ -249,13 +254,11 @@
   </div>
 
   <div class="rank-grid">
-    <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="card elev-sm" style="padding:var(--space-6)">
       <div class="card-kicker">Top 10 — Ransomware claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· leak-site volume</span></div>
       <div id="rank-ransomware"></div>
     </div>
-    <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="card elev-sm" style="padding:var(--space-6)">
       <div class="card-kicker">Top 10 — DDoS claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· hacktivist collectives</span></div>
       <div id="rank-ddos"></div>
     </div>
@@ -364,8 +367,8 @@
     </div>
     <div id="ipcheck-result" class="ipcheck-result" aria-live="polite"></div>
   </form>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card table-wrap" style="padding:0">
+    
     <div class="vuln-scroll">
       <table class="table vuln-table">
         <colgroup>
@@ -382,14 +385,14 @@
 
 <!-- EXPORT -->
 <section class="section" style="padding-top:var(--space-4)">
-  <div class="card blueprint export-banner">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card export-banner">
+    
     <div>
       <div class="card-title">Export today's picture</div>
       <p class="card-body" style="margin:0; max-width:56ch">Markdown export bundles today's brief for pasting elsewhere.</p>
     </div>
     <div class="export-actions">
-      <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief</button>
+      <button type="button" class="btn btn-primary" data-action="download-brief">Download brief</button>
       <span class="copy-status"></span>
     </div>
   </div>
