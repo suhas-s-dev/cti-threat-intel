@@ -757,7 +757,9 @@ function laneX(id){
   return MATRIX_LANE[0] + 0.15 + (h % 1000) / 1000 * (MATRIX_LANE[1] - MATRIX_LANE[0] - 0.3);
 }
 let chartVulnMatrixInst = null;
-function cssToken(name){ return getComputedStyle(document.body).getPropertyValue(name).trim(); }
+// Read from <html>, not <body>: body.map-mode forces the dark tokens while the Map tab is open, and the
+// matrix can re-render then (5-min poll, theme toggle) — it would keep dark colours in light theme.
+function cssToken(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function hexA(hex, a){
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
   if (!m) return hex;
