@@ -850,7 +850,7 @@ function renderKpis(){
     '<div class="s">' + esc(sub) + "</div></div>";
   el.innerHTML =
     tile("infocon lvl-" + level, "INFOCON", labelMap[level] || level, "", "SANS Internet Storm Center level") +
-    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ · " + rw.length + " global", "Leak-site claims, last " + rangeDays + " days — unconfirmed") +
+    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ" + (rw.length > rwApj ? " · " + rw.length + " global" : ""), "Leak-site claims, last " + rangeDays + " days — unconfirmed") +
     tile("", "KEV added", kevWeek.length, kevRw ? kevRw + " with ransomware use" : "", "CISA Known Exploited, last 7 days") +
     tile("", "EPSS ≥ 50%", epssHigh, "/ " + vulnItems.length + " CVEs tracked", "Likely exploited within 30 days (FIRST.org)");
 }
