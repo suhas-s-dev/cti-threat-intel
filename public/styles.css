@@ -290,34 +290,6 @@ img { display: block; max-width: 100%; }
 .head-ctls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-4); }
 
 /* ── Countries page ─────────────────────────────────────────────── */
-/* Hero: a night-side globe (globe.gl, lazy-loaded) with the country's headline numbers overlaid on
-   glass panels. Always dark — it's space — whatever the theme, like the Map tab. */
-.cp-hero { position: relative; min-height: 560px; border-radius: 20px; overflow: hidden; margin-bottom: var(--space-5);
-  background: radial-gradient(120% 90% at 78% 45%, #0f2340 0%, #081222 45%, #050a14 100%); border: 1px solid #1a2a3d; color: var(--dg-text); isolation: isolate; }
-.cp-hero::before { content: ""; position: absolute; inset: 0; z-index: -1; opacity: .5;
-  background-image: radial-gradient(1px 1px at 12% 18%, #fff8, transparent), radial-gradient(1px 1px at 32% 72%, #fff6, transparent), radial-gradient(1px 1px at 48% 12%, #fff5, transparent),
-    radial-gradient(1px 1px at 22% 44%, #fff4, transparent), radial-gradient(1.5px 1.5px at 8% 86%, #fff7, transparent), radial-gradient(1px 1px at 40% 92%, #fff5, transparent); }
-.cp-globe { position: absolute; top: 0; right: -6%; width: 68%; height: 100%; }
-.cp-globe canvas { outline: none; filter: brightness(1.55) saturate(1.25) contrast(1.05); } /* the night texture is very dark on its own */
-.cp-hero-info { position: relative; z-index: 2; width: min(400px, 100%); padding: 28px; display: flex; flex-direction: column; gap: 12px; pointer-events: none; }
-.cp-hero-info > * { pointer-events: auto; }
-.cp-num { color: #7fb0ff; }
-.cp-title { margin: 0; font-size: clamp(30px, 4vw, 44px); line-height: 1.05; letter-spacing: -.02em; color: #fff; }
-.cp-sub { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dg-mute); }
-.cp-form { width: 100%; }
-.cp-input { width: 100%; font: inherit; font-size: 14px; color: var(--dg-text); background: rgba(16,28,44,.7); border: 1px solid #2a3e57; border-radius: 12px; padding: 10px 14px; backdrop-filter: blur(8px); }
-.cp-input::placeholder { color: var(--dg-dim); }
-.cp-input:focus { outline: 2px solid #4a8cff; outline-offset: 0; }
-.cp-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.cp-stat { background: rgba(14,24,38,.62); border: 1px solid rgba(90,130,180,.22); border-radius: 14px; padding: 12px 14px; backdrop-filter: blur(10px); min-width: 0; }
-.cp-stat .l { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dg-mute); }
-.cp-stat .v { font-size: 26px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; margin-top: 4px; color: #fff; font-variant-numeric: tabular-nums; }
-.cp-stat .v small { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0; color: var(--dg-mute); margin-left: 6px; }
-.cp-stat .s { font-size: 11.5px; color: var(--dg-text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cp-stat.wide { grid-column: 1 / -1; }
-.cp-maplink { font-size: 13px; font-weight: 600; color: #7fb0ff; text-decoration: none; align-self: flex-start; }
-.cp-maplink:hover { text-decoration: underline; }
-.cp-hero-note { position: absolute; right: 18px; bottom: 14px; z-index: 2; font-family: var(--font-mono); font-size: 10px; letter-spacing: .04em; color: var(--dg-dim); pointer-events: none; }
 /* Globe badges (CSS2D elements placed by globe.gl) */
 .gb-badge { pointer-events: auto; cursor: pointer; transform: translate(0, 0); display: grid; place-items: center; min-width: 26px; height: 26px; padding: 0 6px; border-radius: 999px;
   font: 600 11px var(--font-mono); color: #fff; background: rgba(12,20,32,.78); border: 1.5px solid var(--rc, #8ea0b1); box-shadow: 0 0 10px color-mix(in srgb, var(--rc, #8ea0b1) 55%, transparent); transition: transform .15s; }
@@ -328,13 +300,8 @@ img { display: block; max-width: 100%; }
 .gb-card b { display: block; font-size: 13px; }
 .gb-card .k { font-family: var(--font-mono); font-size: 10px; color: #4a5b6e; text-transform: uppercase; letter-spacing: .06em; }
 .gb-card::after { content: ""; position: absolute; right: -14px; bottom: -8px; width: 22px; height: 1.5px; background: #ffd24a; transform: rotate(35deg); transform-origin: left; }
-@media (max-width: 860px) {
-  .cp-hero { min-height: 0; }
-  .cp-globe { position: relative; top: 0; right: 0; width: 100%; height: 360px; }
-  .cp-hero-info { width: 100%; padding: 20px; }
-  .cp-hero-note { position: static; padding: 0 20px 14px; }
-  .gb-card { display: none; }
-}
+@media (max-width: 860px) { .gb-card { display: none; } }
+
 .cp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 var(--space-5); }
 .cp-chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--color-divider); background: var(--color-panel); color: var(--color-text); font-size: 12.5px; font-weight: 600; text-decoration: none; }
 .cp-chip:hover { border-color: var(--color-divider-strong); }
@@ -541,7 +508,7 @@ footer.site-foot { border-top: 1px solid var(--color-divider); padding: var(--sp
 
 body.map-mode .nav { padding-left: max(var(--space-4), calc((100% - 1440px) / 2 + var(--space-4))); padding-right: max(var(--space-4), calc((100% - 1440px) / 2 + var(--space-4))); }
 body.map-mode .nav-links a[aria-current='page'] { box-shadow: inset 0 -2px 0 var(--dg-in); }
-body.map-mode .status-strip, body.map-mode footer.site-foot, body.map-mode .section:not(#map) { max-width: 1440px; }
+body.map-mode .status-strip, body.map-mode footer.site-foot, body.map-mode .section:not(#country) { max-width: 1440px; }
 
 /* theme toggle */
 .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; flex-shrink: 0; padding: 0; border: 1px solid var(--color-divider); border-radius: var(--radius-md); background: var(--color-panel); color: var(--color-text); cursor: pointer; transition: border-color .15s, background .15s; }
@@ -611,14 +578,33 @@ body.map-mode .theme-toggle { opacity: .55; }
 .dg-locate::placeholder { color: var(--dg-dim); }
 .dg-reset { background: var(--dg-panel); border: 1px solid var(--dg-line-2); border-radius: var(--radius-md); color: var(--dg-mute); padding: 8px 12px; font-size: 12.5px; font-weight: 700; font-family: var(--font-body); cursor: pointer; white-space: nowrap; }
 .dg-reset:hover { border-color: var(--dg-text); color: var(--dg-text); }
-@media (max-width: 600px) { .dg-tools { width: 100%; } .dg-locate { min-width: 0; flex: 1; } .dg-rtab { padding: 8px 10px; } }
+@media (max-width: 600px) { .dg-tools { width: 100%; flex-wrap: wrap; } .cp-form { flex: 1 1 100%; } .dg-locate { min-width: 0; flex: 1; } .dg-rtab { padding: 8px 10px; } }
 
 /* map stage */
 .dg-stage { display: grid; grid-template-columns: minmax(0, 1fr) 300px; border: 1px solid var(--dg-line); border-radius: var(--dg-radius); overflow: hidden; background: var(--dg-panel); }
 @media (max-width: 980px) { .dg-stage { grid-template-columns: 1fr; } }
 .dg-map-wrap { position: relative; overflow: hidden; background: radial-gradient(120% 90% at 60% 40%, #131d27 0%, #0b1117 60%, #080c10 100%); }
 .dg-map-wrap::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px), radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%); }
-#threatMap { display: block; width: 100%; height: clamp(340px, 40vw, 560px); cursor: grab; touch-action: pan-y; }
+/* The stage row is as tall as the side panel; the map/globe fill it (min height when the panel is short). */
+.dg-map-wrap { min-height: clamp(380px, 42vw, 600px); }
+#threatMap { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
+/* Globe and flat map are two views of one selection; only the active one is shown (and rendered). */
+.cp-globe { position: absolute; inset: 0; }
+.cp-globe canvas { outline: none; filter: brightness(1.55) saturate(1.25) contrast(1.05); } /* the night texture is very dark on its own */
+.dg-map-wrap[data-view="globe"] #threatMap, .dg-map-wrap[data-view="globe"] #dg-coords, .dg-map-wrap[data-view="globe"] .lg-heat { display: none; }
+.dg-map-wrap[data-view="flat"] .cp-globe { display: none; }
+.dg-viewtog { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--dg-line-2); border-radius: 11px; background: var(--dg-panel); }
+.dg-viewtog button { background: transparent; border: 0; border-radius: 8px; color: var(--dg-mute); padding: 6px 12px; font: 600 12.5px var(--font-body); cursor: pointer; }
+.dg-viewtog button:hover { color: var(--dg-text); }
+.dg-viewtog button[aria-pressed="true"] { background: var(--dg-bg); color: var(--dg-text); box-shadow: inset 0 0 0 1px var(--dg-line-2), inset 0 -2px 0 var(--color-accent); }
+.cp-form { display: flex; min-width: 0; }
+.geo-crumb { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 var(--space-3); font-family: var(--dg-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dg-dim); }
+.geo-crumb a, .geo-crumb button { color: var(--dg-mute); text-decoration: none; background: none; border: 0; padding: 0; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.geo-crumb a:hover, .geo-crumb button:hover { color: var(--dg-text); }
+.geo-crumb b { color: var(--dg-text); font-weight: 600; }
+.geo-crumb .x { margin-left: 4px; padding: 2px 8px; border: 1px solid var(--dg-line-2); border-radius: 999px; }
+.cp-body { margin-top: var(--space-4); }
+.darkgrid .cp-chips { margin: var(--space-4) 0 0; }
 #threatMap.dragging { cursor: grabbing; }
 .dg-map-corner { position: absolute; font-family: var(--dg-mono); font-size: 9.5px; letter-spacing: .12em; color: var(--dg-mute); pointer-events: none; z-index: 2; white-space: pre; }
 .dg-map-corner.tl { top: 12px; left: 14px; color: var(--dg-text-2); }
@@ -743,7 +729,7 @@ body.map-mode .theme-toggle { opacity: .55; }
   header.section > div { margin-bottom: var(--space-3) !important; }
 
   /* World is width-limited here, so a 340px-tall canvas was mostly empty sky. */
-  #threatMap { height: clamp(220px, 64vw, 340px); }
+  .dg-map-wrap { min-height: clamp(280px, 76vw, 400px); }
 }
 
 /* ── Print: briefs always print light (dark tokens are screen-only); drop interactive chrome ── */

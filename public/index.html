@@ -35,7 +35,6 @@
     <a href="#vulnerabilities">Vulnerabilities</a>
     <a href="#telegram">Telegram</a>
     <a href="#actors">Actors</a>
-    <a href="#map">Map</a>
     <a href="#iocs">IOCs</a>
   </div>
   <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch to light theme" title="Switch to light theme">
@@ -126,27 +125,91 @@
   </div>
 </section>
 
-<!-- 02 COUNTRIES -->
-<section id="country" class="section" hidden>
-  <div class="cp-hero">
-    <div class="cp-globe" id="cp-globe" role="img" aria-label="Globe of leak-site claims by victim country; the selected country is highlighted"></div>
-    <div class="cp-hero-info">
-      <span class="apj-num cp-num">02 / Geo Intel</span>
-      <h2 class="cp-title" id="cp-title">Country profile</h2>
-      <div class="cp-sub" id="cp-sub"></div>
-      <form id="cp-form" class="cp-form" autocomplete="off">
-        <input id="cp-search" class="cp-input" type="search" list="cp-countries" placeholder="Any country — India, Germany, Brazil…" aria-label="Pick a country">
-        <datalist id="cp-countries"></datalist>
-      </form>
-      <div class="cp-stats" id="cp-stats"></div>
-      <a id="cp-map" class="cp-maplink" href="#map">Open on the flat claim map →</a>
-    </div>
-    <div class="cp-hero-note">Badges: leak-site claims per victim country, selected window · drag to rotate · click a badge or a country</div>
-  </div>
-  <div class="cp-chips" id="cp-chips" aria-label="Most-claimed countries in the time window"></div>
-  <div id="cp-body"><div class="empty">Loading…</div></div>
-</section>
+<!-- 02 GEO INTEL -->
+<!-- Geo Intel: one page for everything geographic (it absorbed the old Map tab). World or region
+     overview when no country is picked; a country profile when one is. Globe and flat dot-matrix
+     map are two views of the same selection. -->
+<section id="country" class="section section-wide" hidden>
+  <div class="darkgrid">
+    <header class="dg-top">
+      <div class="dg-top-left">
+        <span class="dg-num">02 / Geo Intel</span>
+        <h2 class="dg-h"><span class="pulse-dot"></span>Geo Intel <em id="geo-h-em">claims, news &amp; actors by place</em></h2>
+        <div class="dg-sub" id="dg-updated">loading…</div>
+      </div>
+      <div class="dg-top-right">
+        <div class="dg-clock" aria-label="Current UTC time"><span id="dg-clock">--:--:--</span><small>UTC</small></div>
+      </div>
+    </header>
 
+    <div class="dg-banner" id="dg-banner"><span class="lvl-dot"></span><span id="dg-banner-text">Loading INFOCON…</span></div>
+
+    <div class="dg-toolbar">
+      <div class="dg-regions" id="dg-regions" role="tablist" aria-label="Region">
+        <button type="button" class="dg-rtab active" data-region="all">World</button>
+        <button type="button" class="dg-rtab" data-region="apj">APJ</button>
+        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
+        <button type="button" class="dg-rtab" data-region="na">N. America</button>
+        <button type="button" class="dg-rtab" data-region="sa">S. America</button>
+        <button type="button" class="dg-rtab" data-region="me">Middle East</button>
+        <button type="button" class="dg-rtab" data-region="af">Africa</button>
+      </div>
+      <div class="dg-tools">
+        <form id="cp-form" class="cp-form" autocomplete="off">
+          <input id="cp-search" class="dg-locate" type="search" list="cp-countries" placeholder="Any country — India, Germany, Brazil…" aria-label="Pick a country">
+          <datalist id="cp-countries"></datalist>
+        </form>
+        <div class="dg-viewtog" role="radiogroup" aria-label="View">
+          <button type="button" data-view="globe" aria-pressed="true">Globe</button>
+          <button type="button" data-view="flat" aria-pressed="false">Flat</button>
+        </div>
+      </div>
+    </div>
+    <nav class="geo-crumb" id="geo-crumb" aria-label="Scope"></nav>
+
+    <div class="dg-stats" id="dg-stats"></div>
+
+    <div class="dg-stage">
+      <div class="dg-map-wrap" id="dg-map-wrap" data-view="globe">
+        <canvas id="threatMap" aria-label="Flat world map of ransomware leak-site claims by victim country"></canvas>
+        <div class="cp-globe" id="cp-globe" role="img" aria-label="Globe of leak-site claims by victim country"></div>
+        <div class="dg-tip" id="dg-tip" hidden></div>
+        <div class="dg-map-corner tl" id="dg-scope">SCOPE · WORLD</div>
+        <div class="dg-map-corner tr" id="dg-coords">LAT —  LON —</div>
+        <div class="dg-legend">
+          <span id="dg-legend-regions" class="dg-legend-regions"></span>
+          <span class="lg-heat"><b></b>claim density</span>
+          <span class="dg-legend-note">Arcs link countries hit by the same group. They don't show where an attack came from.</span>
+        </div>
+      </div>
+      <aside class="dg-side">
+        <div class="dg-panel-hd"><span id="dg-rank-title">Top targeted countries</span><span class="dg-panel-meta" id="dg-rank-meta"></span></div>
+        <ol class="dg-rank" id="dg-rank"></ol>
+        <div class="dg-panel-hd dg-groups-hd"><span>Most active groups</span><span class="dg-panel-meta">in scope</span></div>
+        <div class="dg-gchips" id="dg-gchips"></div>
+      </aside>
+    </div>
+
+    <div class="cp-chips" id="cp-chips" aria-label="Most-claimed countries in scope"></div>
+
+    <div class="dg-lower">
+      <div class="dg-feed">
+        <div class="dg-panel-hd"><span><span class="rec-dot"></span>Live claim feed</span><span class="dg-panel-meta" id="dg-feed-count">0</span></div>
+        <div class="ticker"><div class="ticker-track" id="dg-ticker"></div></div>
+      </div>
+      <div class="dg-achart dg-trend"><h4><span id="trend-title">News volume by region</span> <span id="trend-legend"></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
+    </div>
+
+    <div class="dg-analytics">
+      <div class="dg-achart"><h4>Top groups <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
+      <div class="dg-achart"><h4>Top sectors <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
+      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span id="radar-scope">Cloudflare Radar · worldwide · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
+    </div>
+
+    <div id="cp-body" class="cp-body"><div class="empty">Loading…</div></div>
+    <div class="dg-note" id="dash-cov"></div>
+  </div>
+</section>
 <!-- 03 RANSOMWARE -->
 <section id="ransomware" class="section" hidden>
   <div class="section-head">
@@ -293,83 +356,11 @@
   <p class="text-muted" style="font-size:12px;margin-top:var(--space-2)">Curated snapshot, not live-collected — self-reported/leak-site claim volumes, not confirmed breach or attack counts. Hover a row for context.</p>
 </section>
 
-<!-- 06 MAP -->
-<section id="map" class="section section-wide" hidden>
-  <div class="darkgrid">
-    <header class="dg-top">
-      <div class="dg-top-left">
-        <span class="dg-num">07 / Map</span>
-        <h2 class="dg-h"><span class="pulse-dot"></span>DarkGrid <em>ransomware claim map</em></h2>
-        <div class="dg-sub" id="dg-updated">loading…</div>
-      </div>
-      <div class="dg-top-right">
-        <div class="dg-clock" aria-label="Current UTC time"><span id="dg-clock">--:--:--</span><small>UTC</small></div>
-      </div>
-    </header>
-
-    <div class="dg-banner" id="dg-banner"><span class="lvl-dot"></span><span id="dg-banner-text">Loading INFOCON…</span></div>
-
-    <div class="dg-stats" id="dg-stats"></div>
-
-    <div class="dg-toolbar">
-      <div class="dg-regions" id="dg-regions" role="tablist" aria-label="Map region">
-        <button type="button" class="dg-rtab active" data-region="all">World</button>
-        <button type="button" class="dg-rtab" data-region="apj">APJ</button>
-        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
-        <button type="button" class="dg-rtab" data-region="na">N. America</button>
-        <button type="button" class="dg-rtab" data-region="sa">S. America</button>
-        <button type="button" class="dg-rtab" data-region="me">Middle East</button>
-        <button type="button" class="dg-rtab" data-region="af">Africa</button>
-      </div>
-      <div class="dg-tools">
-        <input id="dg-locate" class="dg-locate" type="text" placeholder="Locate country…" autocomplete="off" aria-label="Locate country">
-        <a id="dg-profile" class="dg-reset" href="#country" hidden>Country profile →</a>
-        <button type="button" id="dg-reset" class="dg-reset" title="Reset to the default world view">Reset view</button>
-      </div>
-    </div>
-
-    <div class="dg-stage">
-      <div class="dg-map-wrap" id="dg-map-wrap">
-        <canvas id="threatMap" aria-label="World map of ransomware leak-site claims by victim country"></canvas>
-        <div class="dg-tip" id="dg-tip" hidden></div>
-        <div class="dg-map-corner tl" id="dg-scope">SCOPE · WORLD</div>
-        <div class="dg-map-corner tr" id="dg-coords">LAT —  LON —</div>
-        <div class="dg-legend">
-          <span id="dg-legend-regions" class="dg-legend-regions"></span>
-          <span class="lg-heat"><b></b>claim density</span>
-          <span class="dg-legend-note">Arcs link countries hit by the same group. They don't show where an attack came from.</span>
-        </div>
-      </div>
-      <aside class="dg-side">
-        <div class="dg-panel-hd"><span>Top targeted countries</span><span class="dg-panel-meta" id="dg-rank-meta"></span></div>
-        <ol class="dg-rank" id="dg-rank"></ol>
-        <div class="dg-panel-hd dg-groups-hd"><span>Most active groups</span><span class="dg-panel-meta">in scope</span></div>
-        <div class="dg-gchips" id="dg-gchips"></div>
-      </aside>
-    </div>
-
-    <div class="dg-lower">
-      <div class="dg-feed">
-        <div class="dg-panel-hd"><span><span class="rec-dot"></span>Live claim feed</span><span class="dg-panel-meta" id="dg-feed-count">0</span></div>
-        <div class="ticker"><div class="ticker-track" id="dg-ticker"></div></div>
-      </div>
-      <div class="dg-achart dg-trend"><h4>Signal volume by region <span id="trend-legend"></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
-    </div>
-
-    <div class="dg-analytics">
-      <div class="dg-achart"><h4>Top groups <span>leak-site claims · selected region</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
-      <div class="dg-achart"><h4>Top sectors <span>leak-site claims · selected region</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
-      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span>Cloudflare Radar · worldwide · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
-    </div>
-    <div class="dg-note" id="dash-cov"></div>
-  </div>
-</section>
-
 <!-- 07 IOCS -->
 <section id="iocs" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">08 / IOCs</span>
+      <span class="apj-num">07 / IOCs</span>
       <h2 style="margin:0">Indicators of compromise</h2>
     </div>
     <div class="section-controls">

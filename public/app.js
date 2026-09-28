@@ -238,18 +238,21 @@ let iocSearch = "";
 // the map's region under apjti.region, so that's the fallback on first load.
 let geo = normGeo(localStorage.getItem("apjti.geo") || localStorage.getItem("apjti.region"));
 let currentRegion = geo; // the map's scope; same value, kept as its own name for the map code
-let cpCC = (localStorage.getItem("apjti.country") || "").toUpperCase() || null; // Geo Intel page selection
+let cpCC = null; // Geo Intel selection: a country code, or null for the world/region overview
 let CURRENT_ACTORS = [];
 
 /* ---------------- Tab navigation (one section visible at a time) ---------------- */
-const TAB_IDS = ["brief", "country", "ransomware", "vulnerabilities", "telegram", "actors", "map", "iocs"];
-// "#country/IN" opens the Geo Intel page on India; every other hash is a bare tab id.
+const TAB_IDS = ["brief", "country", "ransomware", "vulnerabilities", "telegram", "actors", "iocs"];
+// "#country" is the Geo Intel overview, "#country/IN" its India profile; every other hash is a bare
+// tab id. "#map" is the old Map tab, which Geo Intel absorbed — old links land on the overview.
 function parseHash(h){
-  const [id, arg] = String(h || "").replace(/^#/, "").split("/");
+  let [id, arg] = String(h || "").replace(/^#/, "").split("/");
+  if (id === "map") id = "country";
   return { id, cc: /^[A-Za-z]{2}$/.test(arg || "") ? arg.toUpperCase() : null };
 }
 let activeTab = "brief";
 function showTab(id, opts){
+  if (id === "map") id = "country"; // a stored apjti.tab from before the merge
   if (!TAB_IDS.includes(id)) id = "brief";
   activeTab = id;
   localStorage.setItem("apjti.tab", id);
@@ -271,19 +274,17 @@ function showTab(id, opts){
   });
   if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id + (id === "country" && cpCC ? "/" + cpCC : ""));
   if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
-  if (id === "map"){
+  document.body.classList.toggle("map-mode", id === "country"); // before syncView(): sizes depend on layout
+  if (id === "country"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
     // recompute now that the section actually has layout dimensions.
     [chartTrendInst, chartGroupsInst, chartSectorsInst].forEach(c => c && c.resize());
-    if (typeof startMapLoop === "function" && typeof rwVictims !== "undefined" && rwVictims.length) startMapLoop();
-  }
+    if (typeof rwVictims !== "undefined" && rwVictims.length) buildDashboard(); // also starts the visible view
+  } else if (cpGlobe) cpGlobe.pauseAnimation();
   // Header bits that only mean something on some tabs (e.g. the Brief's tagline and Markdown
   // export) carry data-only-tabs="brief ..." and are hidden everywhere else.
   document.querySelectorAll("[data-only-tabs]").forEach(el => { el.hidden = !el.dataset.onlyTabs.split(/\s+/).includes(id); });
   if (id === "actors" || id === "country") loadApt();
-  if (id === "country") renderCountry();
-  if (cpGlobe){ if (id === "country") cpGlobe.resumeAnimation(); else cpGlobe.pauseAnimation(); }
-  document.body.classList.toggle("map-mode", id === "map");
   syncThemeToggle();
 }
 function wireTabs(){
@@ -295,7 +296,7 @@ function wireTabs(){
   window.addEventListener("hashchange", () => {
     const { id, cc } = parseHash(location.hash);
     if (!TAB_IDS.includes(id)) return;
-    if (id === "country" && cc && cc !== cpCC){ setCountry(cc, { skipRender: id !== activeTab }); window.scrollTo(0, 0); }
+    if (id === "country" && cc !== cpCC && (cc || activeTab === "country")){ setCountry(cc, { skipRender: id !== activeTab }); window.scrollTo(0, 0); }
     if (id !== activeTab) showTab(id, { skipHash: true });
   });
 }
@@ -599,7 +600,7 @@ async function loadApt(){
   populateAptTabs();
   renderApt();
   renderActors(); // re-render curated cards now that sheet aliases are available
-  if (activeTab === "country") renderCountry();
+  renderGeoBody();
 }
 // Curated profile → sheet group, via its name or any "aka" token ("APT36 · Earth Karkaddan").
 function aptMatch(a){
@@ -1229,34 +1230,23 @@ function downloadMarkdown(){
 /* ---------------- DarkGrid: dot-matrix claim map + live ticker + locate ---------------- */
 let chartGroupsInst = null, chartTrendInst = null, chartSectorsInst = null;
 
-function buildTrendSeries(){
+// Daily counts of feed items per series (each { key, test(item) }) over the window, capped at 60 days.
+function buildTrendSeries(series){
   const anchor = maxDate(allItems.map(i => i.date)) || new Date();
   const days = Math.max(1, Math.min(rangeDays, 60)); // cap buckets so the chart stays readable at wide windows
   const buckets = [];
   for (let i = days - 1; i >= 0; i--){
     const d = new Date(anchor.getTime() - i * 86400000);
-    buckets.push(Object.assign({ key: d.toISOString().slice(0,10) }, Object.fromEntries(GEO_KEYS.map(k => [k, 0]))));
+    buckets.push(Object.assign({ key: d.toISOString().slice(0,10) }, Object.fromEntries(series.map(x => [x.key, 0]))));
   }
   const byKey = Object.fromEntries(buckets.map(b => [b.key, b]));
   allItems.forEach(i => {
     if (!i.date) return;
     const b = byKey[i.date.toISOString().slice(0,10)];
     if (!b) return;
-    i.rg.forEach(k => { if (k in b) b[k]++; }); // an item naming two regions counts in both
+    series.forEach(x => { if (x.test(i)) b[x.key]++; }); // an item naming two regions counts in both
   });
   return { buckets, capped: days < rangeDays };
-}
-function computeAgg(regionKey){
-  const scope = REGIONS[regionKey] && REGIONS[regionKey].countries;
-  const byCountry = {}, byGroup = {}, bySector = {};
-  for (const v of rwVictims){
-    const cc = v.cc || "??";
-    if (scope && !scope.includes(cc)) continue;
-    byCountry[cc] = (byCountry[cc] || 0) + 1;
-    byGroup[v.group] = (byGroup[v.group] || 0) + 1;
-    if (v.sector) bySector[v.sector] = (bySector[v.sector] || 0) + 1;
-  }
-  return { byCountry, byGroup, bySector };
 }
 /* ---------------- DarkGrid map: flat dot-matrix world, claim heat, same-group arcs ----------------
    Equirectangular projection over a land mask rasterised once from world-atlas (110m TopoJSON, via
@@ -1391,20 +1381,29 @@ async function loadAtlas(){
   buildMapScene(mapScene.focus, currentRegion);
 }
 
+// Claims in view on the Geo Intel page: the header time window, then a country or a region.
 function scopePool(regionKey, focusCC){
-  if (focusCC) return rwVictims.filter(v => v.cc === focusCC);
+  const pool = windowedClaims();
+  if (focusCC) return pool.filter(v => v.cc === focusCC);
   const scope = REGIONS[regionKey] && REGIONS[regionKey].countries;
-  return scope ? rwVictims.filter(v => scope.includes(v.cc)) : rwVictims;
+  return scope ? pool.filter(v => scope.includes(v.cc)) : pool;
+}
+// With a country selected, the map/globe/ranking still show its surroundings: the current region
+// if the country is in it, otherwise the whole world.
+function contextRegion(focusCC){
+  if (!focusCC) return currentRegion;
+  return currentRegion === "all" || ccRegion(focusCC) === currentRegion ? currentRegion : "all";
 }
 function buildMapScene(focusCC, regionKey){
-  const pool = scopePool(regionKey || currentRegion, focusCC);
+  const ctx = scopePool(regionKey || contextRegion(focusCC), null); // heat, pings, ranking
+  const pool = focusCC ? ctx.filter(v => v.cc === focusCC) : ctx;   // arcs, groups, bursts
   const counts = {};
-  pool.forEach(v => { if (v.cc) counts[v.cc] = (counts[v.cc] || 0) + 1; });
+  ctx.forEach(v => { if (v.cc) counts[v.cc] = (counts[v.cc] || 0) + 1; });
   const max = Math.max(1, ...Object.values(counts));
   const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   const pings = ranked.map(([cc, n], i) => {
     const p = posOf(cc);
-    return p ? { cc, n, lat: p[0], lon: p[1], phase: i * 0.83, label: i < 6 } : null;
+    return p ? { cc, n, lat: p[0], lon: p[1], phase: i * 0.83, label: i < 6 || cc === focusCC } : null;
   }).filter(Boolean);
 
   // Arcs connect countries claimed by the same group — the group's busiest in-scope country (or the
@@ -1413,11 +1412,11 @@ function buildMapScene(focusCC, regionKey){
   const byGroup = {};
   pool.forEach(v => { byGroup[v.group] = (byGroup[v.group] || 0) + 1; });
   const topGroups = Object.entries(byGroup).sort((a, b) => b[1] - a[1]).slice(0, 7).map(([g]) => g);
-  const arcs = [];
+  const arcs = [], everyClaim = windowedClaims();
   topGroups.forEach((g, gi) => {
     const inScope = {}, everywhere = {};
     pool.forEach(v => { if (v.group === g && v.cc) inScope[v.cc] = (inScope[v.cc] || 0) + 1; });
-    rwVictims.forEach(v => { if (v.group === g && v.cc) everywhere[v.cc] = (everywhere[v.cc] || 0) + 1; });
+    everyClaim.forEach(v => { if (v.group === g && v.cc) everywhere[v.cc] = (everywhere[v.cc] || 0) + 1; });
     const hub = focusCC || (Object.entries(inScope).sort((a, b) => b[1] - a[1])[0] || [])[0];
     if (!hub || !posOf(hub)) return;
     Object.entries(everywhere).filter(([cc]) => cc !== hub && posOf(cc)).sort((a, b) => b[1] - a[1]).slice(0, 5)
@@ -1425,23 +1424,26 @@ function buildMapScene(focusCC, regionKey){
         speed: 0.12 + ((gi * 7 + k * 3) % 10) / 70, off: ((gi * 13 + k * 29) % 100) / 100 }));
   });
 
-  mapScene = { counts, max, pings, arcs, focus: focusCC || null, pool,
+  mapScene = { counts, max, pings, arcs, focus: focusCC || null, pool, ranked,
     groups: topGroups.map((g, i) => ({ g, n: byGroup[g], color: ARC_PALETTE[i % ARC_PALETTE.length] })) };
   mapBursts = pool.filter(v => v.cc && posOf(v.cc)).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || ""))).slice(0, 30);
   mapBurstIdx = 0;
   const scopeEl = $("#dg-scope");
-  if (scopeEl) scopeEl.textContent = "SCOPE · " + (focusCC ? ccName(focusCC) : (document.querySelector('.dg-rtab[data-region="' + (regionKey || currentRegion) + '"]') || {}).textContent || "World").toUpperCase();
-  renderMapSide(ranked, pool.length);
+  if (scopeEl) scopeEl.textContent = "SCOPE · " + (focusCC ? ccName(focusCC) : (currentRegion === "all" ? "World" : regionLabel(currentRegion))).toUpperCase();
+  renderMapSide(ranked, ctx.length, focusCC);
   mapDirty = true;
 }
-function renderMapSide(ranked, total){
+function renderMapSide(ranked, total, focusCC){
   const rankEl = $("#dg-rank");
   if (!rankEl) return;
   const top = ranked.slice(0, 10), max = Math.max(1, ...top.map(r => r[1]));
+  // Keep the selected country visible in the list even when it's outside the top 10.
+  if (focusCC && !top.some(([cc]) => cc === focusCC)) top.push([focusCC, (ranked.find(([cc]) => cc === focusCC) || [focusCC, 0])[1]]);
   $("#dg-rank-meta").textContent = total + " claims";
-  rankEl.innerHTML = top.length ? top.map(([cc, n], i) => {
-    return '<li><button type="button" class="dg-rank-row' + (mapScene.focus === cc ? " on" : "") + '" style="--rc:' + regionColor(ccRegion(cc)) + '" data-cc="' + esc(cc) + '">' +
-      '<span class="rk">' + String(i + 1).padStart(2, "0") + '</span><span class="nm">' + esc(ccName(cc)) + '</span>' +
+  rankEl.innerHTML = top.length ? top.map(([cc, n]) => {
+    const i = ranked.findIndex(([c]) => c === cc);
+    return '<li><button type="button" class="dg-rank-row' + (focusCC === cc ? " on" : "") + '" style="--rc:' + regionColor(ccRegion(cc)) + '" data-cc="' + esc(cc) + '">' +
+      '<span class="rk">' + (i < 0 ? "—" : String(i + 1).padStart(2, "0")) + '</span><span class="nm">' + esc(ccName(cc)) + '</span>' +
       '<span class="ct">' + n + '</span><span class="bar"><i style="width:' + (n / max * 100).toFixed(1) + '%"></i></span></button></li>';
   }).join("") : '<li class="dg-empty">No claims in this scope.</li>';
   const chips = $("#dg-gchips");
@@ -1503,7 +1505,7 @@ function arcGeom(arc, g){
 }
 function drawMap(ts){
   const canvas = document.getElementById("threatMap");
-  if (!canvas || activeTab !== "map"){ mapLoopOn = false; return; }
+  if (!canvas || activeTab !== "country" || geoView !== "flat"){ mapLoopOn = false; return; }
   if (!canvas.width || canvas.width !== Math.round(canvas.clientWidth * Math.min(window.devicePixelRatio || 1, 2))) resizeMap();
   const dpr = canvas.width / Math.max(1, canvas.clientWidth);
   const t = (ts || 0) / 1000;
@@ -1645,7 +1647,7 @@ function showMapTip(cc, x, y){
   const tip = $("#dg-tip");
   if (!tip) return;
   if (!cc){ tip.hidden = true; return; }
-  const all = rwVictims.filter(v => v.cc === cc);
+  const all = windowedClaims().filter(v => v.cc === cc);
   const groups = {};
   all.forEach(v => { groups[v.group] = (groups[v.group] || 0) + 1; });
   const topG = Object.entries(groups).sort((a, b) => b[1] - a[1]).slice(0, 3);
@@ -1654,8 +1656,8 @@ function showMapTip(cc, x, y){
   const topS = Object.entries(sectors).sort((a, b) => b[1] - a[1])[0];
   tip.innerHTML = '<div class="tip-hd" style="--rc:' + regionColor(ccRegion(cc)) + '"><span>' + esc(ccName(cc)) + '</span><b>' + all.length + '</b></div>' +
     (all.length ? '<div class="tip-row"><span>Top groups</span>' + topG.map(([g2, n]) => esc(g2) + " <i>" + n + "</i>").join(" · ") + '</div>' +
-      (topS ? '<div class="tip-row"><span>Top sector</span>' + esc(topS[0]) + '</div>' : "") + '<div class="tip-foot">Click to focus · then open its country profile</div>'
-      : '<div class="tip-row"><span>No leak-site claims tracked</span></div>');
+      (topS ? '<div class="tip-row"><span>Top sector</span>' + esc(topS[0]) + '</div>' : "") + '<div class="tip-foot">Click for its profile</div>'
+      : '<div class="tip-row"><span>No leak-site claims in this window</span></div><div class="tip-foot">Click for its profile</div>');
   tip.hidden = false;
   const wrap = $("#dg-map-wrap").getBoundingClientRect();
   const tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -1699,17 +1701,17 @@ function wireMap(){
     const drag = mapDrag; mapDrag = null; canvas.classList.remove("dragging");
     if (!drag || drag.moved) return;
     const p = local(e), cc = pickCountryAt(p.x, p.y, mapGeom());
-    if (cc) focusCountry(cc);
+    if (cc) setCountry(cc);
   });
   const rank = $("#dg-rank");
-  if (rank) rank.addEventListener("click", e => { const b = e.target.closest("[data-cc]"); if (b) focusCountry(b.dataset.cc); });
+  if (rank) rank.addEventListener("click", e => { const b = e.target.closest("[data-cc]"); if (b) setCountry(b.dataset.cc); });
 }
 function tickClock(){
   const el = $("#dg-clock");
   if (el) el.textContent = new Date().toISOString().slice(11, 19);
 }
-// `singleCC` (set by focusCountry(), below) narrows to exactly one country — distinct from
-// `regionKey`, which scopes to one of the named multi-country REGIONS groups.
+// `singleCC` narrows to exactly one country — distinct from `regionKey`, which scopes to one of the
+// named multi-country REGIONS groups.
 function buildTicker(regionKey, singleCC){
   const track = $("#dg-ticker");
   if (!track) return;
@@ -1720,37 +1722,10 @@ function buildTicker(regionKey, singleCC){
       '</b> <span class="tk-arrow">▸</span> ' + victimNameHtml(v.victim) + '<div class="tk-meta">' + (v.sector ? esc(v.sector) + " · " : "") +
       esc(String(v.date).slice(0,10)) + "</div></div></div>";
   });
-  track.innerHTML = items.length ? (items.join("") + items.join("")) : '<div class="tk-item tk-none">No claims' + (singleCC ? " for this country." : " in this region.") + "</div>";
+  track.innerHTML = items.length ? (items.join("") + items.join("")) : '<div class="tk-item tk-none">No claims' + (singleCC ? " for this country" : " in this region") + " in the last " + rangeDays + " days.</div>";
   track.classList.toggle("static", items.length < 6);
   $("#dg-feed-count").textContent = pool.length + " in scope";
 }
-// Shared by the map's click handler, the ranked list, and the locate box — zooms to one country and
-// filters the Live Claim Feed, ranked list, stats and arcs to it.
-function focusCountry(cc, opts){
-  document.querySelectorAll(".dg-rtab").forEach(t => t.classList.remove("active"));
-  buildMapScene(cc, "all");
-  buildTicker("all", cc);
-  renderDashStats("all", cc);
-  const c = posOf(cc);
-  if (c){
-    const span = ["US","CA","RU","CN","BR","AU"].includes(cc) ? 70 : 34;
-    setMapTarget([c[1] - span, c[1] + span, c[0] - span * 0.42, c[0] + span * 0.42]);
-  }
-  // Skipped while the user is still typing in the locate box — setting input.value mid-keystroke
-  // would fight their cursor.
-  if (!opts || opts.setInput !== false){
-    const input = $("#dg-locate");
-    if (input) input.value = ccName(cc);
-  }
-  syncMapProfileLink(cc);
-}
-function syncMapProfileLink(cc){
-  const a = $("#dg-profile");
-  if (!a) return;
-  a.hidden = !cc;
-  if (cc){ a.href = "#country/" + cc; a.textContent = ccName(cc) + " profile →"; }
-}
-
 function renderBanner(){
   const level = String(DATA.infocon || "green").toLowerCase();
   const el = $("#dg-banner");
@@ -1759,91 +1734,86 @@ function renderBanner(){
   const labelMap = { green: "LOW", yellow: "ELEVATED", orange: "HIGH", red: "SEVERE" };
   const cveSet = new Set();
   allItems.forEach(i => { const m = (i.title + " " + (i.desc||"")).match(/CVE-\d{4}-\d{4,7}/gi); if (m) m.forEach(c => cveSet.add(c.toUpperCase())); });
-  const scopeSignals = allItems.filter(i => itemInGeo(i)).length + rwVictims.filter(v => victimInGeo(v)).length;
+  const scopeSignals = cpCC
+    ? allItems.filter(i => i.cc.includes(cpCC)).length + rwVictims.filter(v => v.cc === cpCC).length
+    : allItems.filter(i => itemInGeo(i)).length + rwVictims.filter(v => victimInGeo(v)).length;
+  const where = cpCC ? "for " + esc(ccName(cpCC)) : geo === "all" ? "worldwide" : "in " + esc(geoLabel());
   $("#dg-banner-text").innerHTML = "<b>INFOCON " + esc(level.toUpperCase()) + " · " + (labelMap[level]||"—") + "</b><span class=\"sep\"></span>SANS Internet Storm Center<span class=\"sep\"></span>" +
-    scopeSignals + " signals " + (geo === "all" ? "worldwide" : "in " + esc(geoLabel())) + " · " + cveSet.size + " CVEs tracked <span class=\"dim\">(our own volume heuristic, not an official alert)</span>";
+    scopeSignals + " signals " + where + " · " + cveSet.size + " CVEs tracked <span class=\"dim\">(our own volume heuristic, not an official alert)</span>";
 }
-// The map's region tabs and the header's region filter are one setting (setGeo()); this just moves
-// the map to it and clears any country focus.
+// Region tabs: picking the current region again (or its tab while a country is open) goes back to
+// that region's overview; picking another one changes the app-wide region filter (setGeo()).
 function selectRegion(key){
   key = normGeo(key);
-  if (key !== geo){ setGeo(key); return; } // setGeo() re-renders everything, including this
-  currentRegion = key;
-  document.querySelectorAll(".dg-rtab").forEach(t => { const on = t.dataset.region === key; t.classList.toggle("active", on); t.setAttribute("aria-selected", String(on)); });
-  setMapTarget(REGION_VIEW[key] || REGION_VIEW.all);
-  const input = $("#dg-locate");
-  if (input) input.value = "";
-  buildMapScene(null, key);
-  buildTicker(key);
-  renderDashStats(key);
-  syncMapProfileLink(null);
+  if (key !== geo){ setGeo(key); return; }
+  setCountry(null);
 }
-function locateCandidates(){
-  const set = new Set(Object.keys(CENTROIDS));
-  rwVictims.forEach(v => v.cc && set.add(v.cc));
-  maskCountries.forEach(c => c.cc && set.add(c.cc));
-  return [...set].map(cc => [cc, ccName(cc)]);
-}
-function wireLocate(){
-  const input = $("#dg-locate");
-  if (!input || input._wired) return;
-  input._wired = true;
-  input.addEventListener("input", () => {
-    const q = input.value.trim().toLowerCase();
-    if (!q){ selectRegion(currentRegion); return; }
-    const cands = locateCandidates();
-    const hit = cands.find(([cc]) => cc.toLowerCase() === q) ||
-      cands.find(([, name]) => name.toLowerCase().startsWith(q)) ||
-      (q.length > 2 && cands.find(([, name]) => name.toLowerCase().includes(q)));
-    if (hit) focusCountry(hit[0], { setInput: false });
-  });
-}
-function resetMapView(){ selectRegion("all"); }
-function wireResetView(){
-  const btn = $("#dg-reset");
-  if (!btn || btn._wired) return;
-  btn._wired = true;
-  btn.addEventListener("click", resetMapView);
-}
-/* ---------------- Rendering: real (not claimed) DDoS attack traffic — Cloudflare Radar ---------------- */
+// Real (not claimed) DDoS attack traffic from Cloudflare Radar: worldwide from the stored blob, or the
+// selected country's breakdown via /api/radar (loadRadar(), cached per country).
 function renderDdosTelemetry(){
   const el = $("#radar-ddos");
   if (!el) return;
-  const dt = DATA.ddosTelemetry;
-  const l3 = (dt && dt.l3 && dt.l3.global) || [], l7 = (dt && dt.l7 && dt.l7.global) || [];
-  if (!l3.length && !l7.length){
-    el.innerHTML = '<div class="empty">No Cloudflare Radar data cached yet — set CF_RADAR_TOKEN (free Account &gt; Radar &gt; Read token) to enable real, measured DDoS attack-traffic telemetry alongside the claims above.</div>';
-    return;
-  }
+  const scopeEl = $("#radar-scope");
+  if (scopeEl) scopeEl.textContent = "Cloudflare Radar · " + (cpCC ? ccName(cpCC) : "worldwide") + " · measured, not claimed";
   const rowHtml = r => '<div class="radar-row"><span class="radar-label">' + esc(r.label) + '</span>' +
     '<span class="radar-bar"><span class="radar-fill" style="width:' + Math.min(100, r.pct) + '%"></span></span>' +
     '<span class="radar-pct">' + r.pct.toFixed(1) + "%</span></div>";
   const colHtml = (list, empty) => list.length ? list.map(rowHtml).join("") : '<div class="empty">' + empty + "</div>";
+  let l3, l7, where;
+  if (cpCC){
+    const r = radarCache.get(cpCC);
+    if (!r || r === "loading"){ el.innerHTML = '<div class="empty">Loading Radar data for ' + esc(ccName(cpCC)) + "…</div>"; loadRadar(cpCC); return; }
+    if (r.error){ el.innerHTML = '<div class="empty">' + esc(r.error) + "</div>"; return; }
+    l3 = r.data.l3; l7 = r.data.l7; where = "targeting " + ccName(cpCC);
+  } else {
+    const dt = DATA.ddosTelemetry;
+    l3 = (dt && dt.l3 && dt.l3.global) || []; l7 = (dt && dt.l7 && dt.l7.global) || []; where = "worldwide";
+    if (!l3.length && !l7.length){
+      el.innerHTML = '<div class="empty">No Cloudflare Radar data cached yet — set CF_RADAR_TOKEN (free Account &gt; Radar &gt; Read token) to enable real, measured DDoS attack-traffic telemetry alongside the claims above.</div>';
+      return;
+    }
+  }
   el.innerHTML =
-    '<div><div class="radar-col-hd">L3/L4 attack vectors, worldwide (7d)</div>' + colHtml(l3, "No L3/L4 attack traffic recorded.") + "</div>" +
-    '<div><div class="radar-col-hd">L7 HTTP methods, worldwide (7d)</div>' + colHtml(l7, "No L7 attack traffic recorded.") + "</div>" +
-    '<p class="cp-note" style="grid-column:1/-1">Per-country breakdowns are on each country\'s page (Geo Intel tab).</p>';
+    '<div><div class="radar-col-hd">L3/L4 attack vectors, ' + esc(where) + " (7d)</div>" + colHtml(l3, "No L3/L4 attack traffic recorded.") + "</div>" +
+    '<div><div class="radar-col-hd">L7 HTTP methods, ' + esc(where) + " (7d)</div>" + colHtml(l7, "No L7 attack traffic recorded.") + "</div>" +
+    '<p class="cp-note" style="grid-column:1/-1">Share of attack traffic by type — not attack counts, and not confirmation of any claim.' + (cpCC ? "" : " Pick a country for its own breakdown.") + "</p>";
 }
 function renderDashStats(regionKey, focusCC){
+  const el = $("#dg-stats");
+  if (!el) return;
   const pool = scopePool(regionKey || currentRegion, focusCC);
-  const countries = new Set(pool.map(v => v.cc).filter(Boolean));
   const groups = new Set(pool.map(v => v.group));
+  const stat = ([l, v, sub, cls], i) => '<div class="dg-stat ' + (cls || "") + '" style="--i:' + i + '"><div class="l">' + esc(l) + '</div><div class="v">' + esc(String(v)) +
+    '</div><div class="s" title="' + esc(sub) + '">' + esc(sub) + "</div></div>";
+  if (focusCC){
+    const stored = rwVictims.filter(v => v.cc === focusCC);
+    const top = countByKey(pool, "group")[0];
+    const { news, social } = countryMentions(focusCC);
+    const last = stored.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0];
+    el.innerHTML = [
+      ["Claims · " + rangeDays + "d", pool.length, stored.length > pool.length ? "of " + stored.length + " stored" : "leak-site, unconfirmed", "hot"],
+      ["Active groups", groups.size, top ? "top: " + top[0] : "none in this window"],
+      ["News mentions", news.length, "feed items naming " + ccName(focusCC)],
+      ["Social mentions", social.length, "Telegram + Mastodon"],
+      ["Latest claim", last ? String(last.date || "").slice(0, 10) : "—", last ? last.group + " ▸ " + last.victim : "none stored"]
+    ].map(stat).join("");
+    return;
+  }
+  const countries = new Set(pool.map(v => v.cc).filter(Boolean));
   const byCc = {};
   pool.forEach(v => { if (v.cc) byCc[v.cc] = (byCc[v.cc] || 0) + 1; });
   const [topCc, topN] = Object.entries(byCc).sort((a, b) => b[1] - a[1])[0] || [null, 0];
   const cutoff = Date.now() - 7 * 86400000;
   const last7 = pool.filter(v => v.date && new Date(v.date).getTime() >= cutoff).length;
-  const cveSet = new Set();
-  allItems.forEach(i => { const m = (i.title + " " + (i.desc||"")).match(/CVE-\d{4}-\d{4,7}/gi); if (m) m.forEach(c => cveSet.add(c.toUpperCase())); });
   const pct = pool.length ? Math.round(topN / pool.length * 100) : 0;
-  $("#dg-stats").innerHTML = [
-    ["Claims in scope", pool.length, last7 + " in the last 7 days", ""],
+  const news = allItems.filter(i => itemInGeo(i, regionKey || currentRegion) && inWindow(i.date, (maxDate(allItems.map(x => x.date)) || new Date()).getTime())).length;
+  el.innerHTML = [
+    ["Claims · " + rangeDays + "d", pool.length, last7 + " in the last 7 days", ""],
     ["Most targeted", topCc ? ccName(topCc) : "—", topCc ? topN + " claims · " + pct + "% of scope" : "no claims in scope", "hot"],
     ["Countries hit", countries.size, "victim countries", ""],
     ["Active groups", groups.size, "posting to leak sites", ""],
-    ["CVEs tracked", cveSet.size, "mentioned in the feed", ""]
-  ].map(([l, v, sub, cls], i) => '<div class="dg-stat ' + cls + '" style="--i:' + i + '"><div class="l">' + esc(l) + '</div><div class="v">' + esc(String(v)) +
-    '</div><div class="s">' + esc(sub) + "</div></div>").join("");
+    ["News mentions", news, (regionKey || currentRegion) === "all" ? "feed items naming a country" : "feed items naming " + regionLabel(regionKey || currentRegion), ""]
+  ].map(stat).join("");
 }
 function wireRegionTabs(){
   document.querySelectorAll(".dg-rtab").forEach(t => {
@@ -1852,35 +1822,103 @@ function wireRegionTabs(){
     t.addEventListener("click", () => selectRegion(t.dataset.region));
   });
 }
+// World › Region › Country breadcrumb above the stage; the ✕ drops back to the region overview.
+function renderCrumb(){
+  const el = $("#geo-crumb");
+  if (!el) return;
+  const rg = cpCC ? contextRegion(cpCC) : currentRegion;
+  const parts = ['<button type="button" data-crumb="all">World</button>'];
+  const ownRg = cpCC ? ccRegion(cpCC) : rg;
+  if (ownRg !== "all" && ownRg !== "other") parts.push(cpCC ? '<button type="button" data-crumb="' + ownRg + '">' + esc(regionLabel(ownRg)) + "</button>" : "<b>" + esc(regionLabel(ownRg)) + "</b>");
+  if (cpCC) parts.push("<b>" + flagEmoji(cpCC) + " " + esc(ccName(cpCC)) + '</b><button type="button" class="x" data-crumb="clear" aria-label="Back to the overview">✕ overview</button>');
+  el.innerHTML = parts.join("<span>›</span>");
+  if (!el._wired){
+    el._wired = true;
+    el.addEventListener("click", e => {
+      const b = e.target.closest("[data-crumb]");
+      if (!b) return;
+      const k = b.dataset.crumb;
+      if (k === "clear") setCountry(null);
+      else if (k === geo) setCountry(null);
+      else setGeo(k);
+    });
+  }
+}
+// Globe / Flat toggle — two renderings of the same selection; only the visible one animates.
+let geoView = (() => { try { return localStorage.getItem("apjti.geoView") === "flat" ? "flat" : "globe"; } catch (_){ return "globe"; } })();
+function setView(v){
+  geoView = v === "flat" ? "flat" : "globe";
+  try { localStorage.setItem("apjti.geoView", geoView); } catch (_){}
+  syncView();
+}
+function syncView(){
+  const wrap = $("#dg-map-wrap");
+  if (wrap) wrap.dataset.view = geoView;
+  document.querySelectorAll("[data-view]").forEach(b => { if (b.tagName === "BUTTON") b.setAttribute("aria-pressed", String(b.dataset.view === geoView)); });
+  showMapTip(null);
+  if (activeTab !== "country") return;
+  if (geoView === "flat"){
+    if (cpGlobe) cpGlobe.pauseAnimation();
+    resizeMap();
+    startMapLoop();
+  } else {
+    if (globeState === "idle") initGlobe();
+    else if (cpGlobe){ cpGlobe.resumeAnimation(); const el = $("#cp-globe"); if (el.clientWidth) cpGlobe.width(el.clientWidth).height(el.clientHeight); updateGlobe(); }
+  }
+}
+function wireViewToggle(){
+  document.querySelectorAll(".dg-viewtog [data-view]").forEach(b => {
+    if (b._wired) return;
+    b._wired = true;
+    b.addEventListener("click", () => setView(b.dataset.view));
+  });
+}
+// Where the flat map and globe should be looking: the selected country, else the region.
+let lastAim = null;
+function aimViews(){
+  const key = cpCC ? "cc:" + cpCC : "rg:" + currentRegion;
+  if (key === lastAim && mapTarget) return;
+  lastAim = key;
+  const c = cpCC && posOf(cpCC);
+  if (c){
+    const span = ["US","CA","RU","CN","BR","AU"].includes(cpCC) ? 70 : 34;
+    setMapTarget([c[1] - span, c[1] + span, c[0] - span * 0.42, c[0] + span * 0.42]);
+  } else setMapTarget(REGION_VIEW[currentRegion] || REGION_VIEW.all);
+  if (cpGlobe) aimGlobe();
+}
+// The Geo Intel page renderer: overview (world/region) or a country profile, both views, all panels.
 function buildDashboard(){
   const dates = rwVictims.map(v => v.date).filter(Boolean).sort();
-  const focus = mapScene.focus;
+  const focus = cpCC;
 
   renderDashStats(currentRegion, focus);
   renderDdosTelemetry();
   renderBanner();
   renderKpis();
+  renderCrumb();
   document.querySelectorAll(".dg-rtab").forEach(t => t.classList.toggle("active", !focus && t.dataset.region === currentRegion));
   const legend = $("#dg-legend-regions");
   if (legend) legend.innerHTML = [...GEO_KEYS, "other"].map(k => '<span><i class="lg-rg" style="--rc:' + regionColor(k) + '"></i>' + esc(regionLabel(k)) + "</span>").join("");
 
-  $("#dg-updated").textContent = rwVictims.length + " leak-site claims tracked · latest " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a");
+  $("#dg-updated").textContent = rwVictims.length + " leak-site claims stored · latest " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a") + " · panels follow the " + rangeDays + "-day window";
   $("#dash-cov").textContent = "Coverage " + (dates[0] ? String(dates[0]).slice(0,10) : "n/a") + " → " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a") + " · leak-site claims, not confirmed breaches · refreshed every 30 min server-side";
 
-  if (!mapTarget) setMapTarget(REGION_VIEW[currentRegion] || REGION_VIEW.all);
-  buildMapScene(focus, currentRegion);
+  buildMapScene(focus, contextRegion(focus));
   buildTicker(currentRegion, focus);
+  aimViews();
   wireMap();
-  wireLocate();
-  wireResetView();
   wireRegionTabs();
+  wireViewToggle();
   loadAtlas();
-  if (activeTab === "map") startMapLoop();
+  syncView();
   if (!tickClock._on){ tickClock._on = true; tickClock(); setInterval(tickClock, 1000); }
+  renderCountryChips();
+  renderGeoBody();
+  if (cpGlobe) updateGlobe();
 
-  const { byGroup, bySector } = computeAgg(currentRegion);
-  const topGroups = Object.entries(byGroup).sort((a,b) => b[1]-a[1]).slice(0, 8);
-  const topSectors = Object.entries(bySector).sort((a,b) => b[1]-a[1]).slice(0, 8);
+  const scoped = scopePool(currentRegion, focus);
+  const topGroups = countByKey(scoped, "group").slice(0, 8);
+  const topSectors = countByKey(scoped, "sector").slice(0, 8);
 
   if (typeof Chart === "undefined") return;
   const mono = "'IBM Plex Mono', ui-monospace, monospace";
@@ -1898,17 +1936,20 @@ function buildDashboard(){
 
   const ctxT = document.getElementById("chartTrend");
   if (ctxT){
-    const { buckets, capped } = buildTrendSeries();
+    // Overview: one line per region (the selected one drawn on top). Country: that country vs its region.
+    const rgOf = focus ? ccRegion(focus) : null;
+    const series = focus
+      ? [{ key: "cc", label: ccName(focus), color: regionColor(rgOf), test: i => i.cc.includes(focus) },
+         ...(rgOf !== "other" ? [{ key: "rg", label: regionLabel(rgOf) + " (all)", color: "#8ea0b1", test: i => i.rg.includes(rgOf), dim: true }] : [])]
+      : GEO_KEYS.map(k => ({ key: k, label: regionLabel(k), color: regionColor(k), test: i => i.rg.includes(k), dim: geo !== "all" && k !== geo }));
+    const { buckets, capped } = buildTrendSeries(series);
     if (chartTrendInst) chartTrendInst.destroy();
-    // One line per region; with a region picked, it's drawn on top and the others fade back.
-    const line = (label, key, hex) => {
-      const dim = geo !== "all" && key !== geo;
-      return { label, data: buckets.map(b => b[key]), borderColor: dim ? hex + "55" : hex, backgroundColor: c => dim ? "transparent" : fade(c, hex),
-        fill: !dim && geo !== "all", order: dim ? 1 : 0, pointRadius: 0, pointHoverRadius: 3, borderWidth: dim ? 1.1 : 1.8, tension: 0.35 };
-    };
+    const line = x => ({ label: x.label, data: buckets.map(b => b[x.key]), borderColor: x.dim ? x.color + "66" : x.color,
+      backgroundColor: c => x.dim ? "transparent" : fade(c, x.color), fill: !x.dim && (!!focus || geo !== "all"), order: x.dim ? 1 : 0,
+      pointRadius: 0, pointHoverRadius: 3, borderWidth: x.dim ? 1.1 : 1.8, tension: 0.35 });
     chartTrendInst = new Chart(ctxT, {
       type: "line",
-      data: { labels: buckets.map(b => b.key.slice(5)), datasets: GEO_KEYS.map(k => line(regionLabel(k), k, regionColor(k))) },
+      data: { labels: buckets.map(b => b.key.slice(5)), datasets: series.map(line) },
       options: {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
@@ -1919,10 +1960,12 @@ function buildDashboard(){
         }
       }
     });
-    const note = ctxT.closest(".dg-achart").querySelector("h4");
-    if (note) note.title = capped ? "Capped to the last 60 days for readability." : "";
-    const legend = $("#trend-legend");
-    if (legend) legend.innerHTML = GEO_KEYS.map(k => '<span class="sw" style="--rc:' + regionColor(k) + '">' + esc(regionLabel(k)) + "</span>").join("");
+    const h4 = ctxT.closest(".dg-achart").querySelector("h4");
+    if (h4) h4.title = capped ? "Capped to the last 60 days for readability." : "";
+    const title = $("#trend-title");
+    if (title) title.textContent = focus ? "News mentions · " + ccName(focus) + " vs region" : "News volume by region";
+    const legendEl = $("#trend-legend");
+    if (legendEl) legendEl.innerHTML = series.map(x => '<span class="sw" style="--rc:' + x.color + '">' + esc(x.label) + "</span>").join("");
   }
 
   const hbar = (el, inst, rows, colorFor) => {
@@ -2011,7 +2054,6 @@ function wireActions(){
     localStorage.setItem("apjti.range", String(rangeDays));
     document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.t === c.dataset.t)));
     renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); buildDashboard();
-    if (activeTab === "country") renderCountry(); else renderCountryChips();
   }));
   document.querySelectorAll("[data-geo]").forEach(c => c.addEventListener("click", () => setGeo(c.dataset.geo)));
   document.querySelectorAll("[data-tgf]").forEach(c => c.addEventListener("click", () => {
@@ -2047,10 +2089,12 @@ function wireActions(){
   });
 }
 
-/* ---------------- Geo Intel page: everything the collection holds for one country ---------------- */
-// Pure client-side view over /api/data (claims by victim country, items/posts by the worker's cc
-// tags) plus two lazy extras: the APT sheet (/api/actors, groups whose Targets name the country) and
-// Cloudflare Radar's measured attack traffic for it (/api/radar?cc=, edge-cached per country).
+/* ---------------- Geo Intel page: world / region overview, or everything held for one country ----------------
+   Pure client-side view over /api/data (claims by victim country, items/posts by the worker's cc/rg
+   tags), plus two lazy extras: the APT sheet (/api/actors, groups whose Targets name a country) and
+   Cloudflare Radar's measured attack traffic per country (/api/radar?cc=, edge-cached). The page
+   frame (stats, map/globe, ticker, charts, Radar) is buildDashboard(); this section is the country
+   selection, the panels under the stage (renderGeoBody()) and the globe. */
 const radarCache = new Map(); // cc → { data } | { error } | "loading"
 function flagEmoji(cc){
   return /^[A-Z]{2}$/.test(cc || "") ? String.fromCodePoint(...[...cc].map(c => 127397 + c.charCodeAt(0))) : "🌐";
@@ -2078,123 +2122,134 @@ function claimsByCountry(list){
   list.forEach(v => { if (v.cc) by[v.cc] = (by[v.cc] || 0) + 1; });
   return Object.entries(by).sort((a, b) => b[1] - a[1]);
 }
-function renderCountryChips(){
-  const el = $("#cp-chips");
-  if (!el) return;
-  const top = claimsByCountry(windowedClaims()).slice(0, 16);
-  el.innerHTML = top.length ? '<span class="apj-eyebrow" style="align-self:center;margin-right:4px">Most claimed · ' + rangeDays + " days</span>" + top.map(([cc, n]) =>
-    '<a class="cp-chip" href="#country/' + esc(cc) + '"' + (cc === cpCC ? ' aria-current="true"' : "") + '><i style="--rc:' + regionColor(ccRegion(cc)) + '"></i>' + esc(ccName(cc)) + "<b>" + n + "</b></a>").join("") : "";
-  const dl = $("#cp-countries");
-  if (dl && dl.options.length !== knownCountries().length) dl.innerHTML = knownCountries().map(([, name]) => '<option value="' + esc(name) + '">').join("");
-}
-function setCountry(cc, opts){
-  cc = String(cc || "").toUpperCase();
-  if (!/^[A-Z]{2}$/.test(cc)) return;
-  cpCC = cc;
-  try { localStorage.setItem("apjti.country", cc); } catch (_){}
-  if (activeTab === "country") history.replaceState(null, "", "#country/" + cc);
-  const input = $("#cp-search");
-  if (input && document.activeElement !== input) input.value = "";
-  if (!(opts && opts.skipRender)){ renderCountryChips(); renderCountry(); }
-}
-function barsHtml(rows, empty){
-  if (!rows.length) return '<div class="bempty">' + esc(empty) + "</div>";
-  const max = Math.max(1, ...rows.map(r => r[1]));
-  return rows.map(([label, n]) => '<div class="cp-bar"><span>' + esc(label) + "</span><b>" + n + '</b><div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.round(n / max * 100) + '%"></div></div></div>').join("");
-}
 function countByKey(list, key){
   const by = {};
   list.forEach(x => { const k = x[key]; if (k) by[k] = (by[k] || 0) + 1; });
   return Object.entries(by).sort((a, b) => b[1] - a[1]);
 }
-function renderCountry(){
+function newest(list){ return list.slice().sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0)); }
+// Feed items and Telegram/Mastodon posts naming a country, inside the window.
+function countryMentions(cc){
+  const ia = maxDate(allItems.map(i => i.date)), sa = maxDate([...telegramItems, ...rwNewsItems].map(i => i.date));
+  return {
+    news: newest(allItems.filter(i => i.cc.includes(cc) && (!ia || inWindow(i.date, ia.getTime())))),
+    social: newest([...telegramItems, ...rwNewsItems].filter(i => i.cc.includes(cc) && (!sa || inWindow(i.date, sa.getTime()))))
+  };
+}
+function renderCountryChips(){
+  const el = $("#cp-chips");
+  if (!el) return;
+  const rg = contextRegion(cpCC);
+  const top = claimsByCountry(scopePool(rg, null)).slice(0, 16);
+  el.innerHTML = top.length ? '<span class="apj-eyebrow" style="align-self:center;margin-right:4px">Most claimed · ' + esc(rg === "all" ? "world" : regionLabel(rg)) + " · " + rangeDays + " days</span>" + top.map(([cc, n]) =>
+    '<a class="cp-chip" href="#country/' + esc(cc) + '"' + (cc === cpCC ? ' aria-current="true"' : "") + '><i style="--rc:' + regionColor(ccRegion(cc)) + '"></i>' + esc(ccName(cc)) + "<b>" + n + "</b></a>").join("") : "";
+  const dl = $("#cp-countries");
+  if (dl && dl.options.length !== knownCountries().length) dl.innerHTML = knownCountries().map(([, name]) => '<option value="' + esc(name) + '">').join("");
+}
+// null → back to the world/region overview.
+function setCountry(cc, opts){
+  cc = cc ? String(cc).toUpperCase() : null;
+  if (cc && !/^[A-Z]{2}$/.test(cc)) return;
+  if (cc !== cpCC) claimsExpanded = false;
+  cpCC = cc;
+  if (activeTab === "country") history.replaceState(null, "", "#country" + (cc ? "/" + cc : ""));
+  const input = $("#cp-search");
+  if (input && document.activeElement !== input) input.value = "";
+  if (!(opts && opts.skipRender)) buildDashboard();
+}
+const CLAIMS_PREVIEW = 12;
+let claimsExpanded = false;
+function renderGeoBody(){
   const body = $("#cp-body");
   if (!body) return;
-  if (!cpCC){
-    const top = claimsByCountry(windowedClaims())[0];
-    if (!top && !rwVictims.length && !allItems.length){ body.innerHTML = '<div class="empty">Loading…</div>'; return; }
-    cpCC = top ? top[0] : "US";
-    if (activeTab === "country") history.replaceState(null, "", "#country/" + cpCC);
-  }
-  const cc = cpCC, name = ccName(cc), region = ccRegion(cc);
-  $("#cp-title").textContent = flagEmoji(cc) + " " + name;
-  $("#cp-sub").textContent = regionLabel(region) + " · " + cc + " · last " + rangeDays + " days";
-  const mapLink = $("#cp-map");
-  if (mapLink) mapLink.href = "#map";
-  document.querySelectorAll("#cp-chips .cp-chip").forEach(a => a.setAttribute("aria-current", String(a.getAttribute("href") === "#country/" + cc)));
-
-  const allClaims = rwVictims.filter(v => v.cc === cc);
-  const claims = windowedClaims().filter(v => v.cc === cc);
-  const itemAnchor = maxDate(allItems.map(i => i.date));
-  const news = allItems.filter(i => i.cc.includes(cc) && (!itemAnchor || inWindow(i.date, itemAnchor.getTime())))
-    .sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
-  const socialAnchor = maxDate([...telegramItems, ...rwNewsItems].map(i => i.date));
-  const social = [...telegramItems, ...rwNewsItems].filter(i => i.cc.includes(cc) && (!socialAnchor || inWindow(i.date, socialAnchor.getTime())))
-    .sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
-  const groups = countByKey(claims, "group"), sectors = countByKey(claims, "sector");
-  const last = allClaims.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0];
-
-  // Headline numbers sit on the globe hero as glass panels.
-  const tile = (label, value, small, sub, cls) => '<div class="cp-stat' + (cls ? " " + cls : "") + '"><div class="l">' + esc(label) + '</div><div class="v">' + esc(String(value)) +
-    (small ? "<small>" + esc(small) + "</small>" : "") + '</div><div class="s" title="' + esc(sub) + '">' + esc(sub) + "</div></div>";
-  $("#cp-stats").innerHTML =
-    tile("Ransomware claims", claims.length, allClaims.length > claims.length ? "of " + allClaims.length + " stored" : "", "Leak-site claims · unconfirmed") +
-    tile("Active groups", groups.length, "", groups[0] ? "Top: " + groups[0][0] : "None in this window") +
-    tile("News mentions", news.length, social.length ? "+" + social.length + " social" : "", "Feed items naming " + name) +
-    tile("Latest claim", last ? String(last.date || "").slice(5, 10) || "—" : "—", last ? String(last.date || "").slice(0, 4) : "", last ? last.group + " ▸ " + last.victim : "None stored");
-
-  const claimRows = claims.slice(0, 40).map(v => "<tr>" +
-    '<td data-label="Organization">' + victimNameHtml(v.victim) + "</td>" +
-    '<td data-label="Sector" class="text-muted">' + esc(v.sector || "—") + "</td>" +
-    '<td data-label="Group">' + esc(v.group) + "</td>" +
-    '<td data-label="Claimed" class="text-muted">' + (v.date ? esc(String(v.date).slice(0, 10)) : "—") + "</td></tr>").join("");
-  const claimsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Ransomware claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· ransomware.live leak sites, newest first' + (claims.length > 40 ? " · 40 of " + claims.length : "") + "</span></div>" +
-    (claims.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Claimed</th></tr></thead><tbody>' + claimRows + "</tbody></table></div>"
-      : '<div class="bempty">No claims against ' + esc(name) + " in the last " + rangeDays + " days" + (allClaims.length ? " (" + allClaims.length + " older ones stored — widen the window)." : ".") + "</div>") + "</div>";
-
+  if (!rwVictims.length && !allItems.length){ body.innerHTML = '<div class="empty">Loading…</div>'; return; }
+  const card = (kicker, sub, inner) => '<div class="card elev-sm cp-card"><div class="card-kicker">' + kicker +
+    (sub ? ' <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· ' + sub + "</span>" : "") + "</div>" + inner + "</div>";
   const newsList = (list, max, withChannel) => list.length ? '<ul class="cp-list">' + list.slice(0, max).map(i =>
     '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a>" +
     '<div class="card-meta">' + esc(withChannel && i.channel ? i.channel : i.src) + (i.date ? " · " + fmtDate(i.date) : "") +
       (i.claim ? ' · <span class="tag tag-accent">Actor claim</span>' : "") + (i.lens ? ' · <span class="tag tag-neutral">DDoS · AppSec</span>' : "") + "</div></li>").join("") + "</ul>" : "";
-  const newsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">In the news <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· items naming ' + esc(name) + ", its cities or country-specific terms</span></div>" +
-    (newsList(news, 14) || '<div class="bempty">No feed items mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") + "</div>";
-  const socialCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Telegram &amp; community <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· unmoderated — claims, not confirmed</span></div>' +
-    (newsList(social, 10, true) || '<div class="bempty">No Telegram or Mastodon posts mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") + "</div>";
+  const actorRow = a => "<li><b>" + esc(a.name) + '</b> <span class="text-muted">· ' + esc(a.motive) + " · " + esc(a.origin) + "</span>" +
+    '<div class="card-meta">' + esc(a.targets) + "</div></li>";
+
+  if (!cpCC){
+    // Overview: what's being said about the region (or anywhere), and who targets it.
+    const rg = currentRegion, label = rg === "all" ? "any country" : regionLabel(rg);
+    const ia = maxDate(allItems.map(i => i.date)), sa = maxDate([...telegramItems, ...rwNewsItems].map(i => i.date));
+    const inRg = i => rg === "all" ? i.rg.length > 0 : i.rg.includes(rg);
+    const news = newest(allItems.filter(i => inRg(i) && (!ia || inWindow(i.date, ia.getTime()))));
+    const social = newest([...telegramItems, ...rwNewsItems].filter(i => inRg(i) && (!sa || inWindow(i.date, sa.getTime()))));
+    const actors = mergedActors().filter(a => actorTargetsRegion(a, rg));
+    const sheetN = (aptGroups || []).filter(g => rg === "all" ? g.cc.length : g.rg.includes(rg)).length;
+    body.innerHTML = '<div class="cp-grid"><div class="cp-col">' +
+      card("In the news", "items naming " + esc(label) + ", last " + rangeDays + " days", newsList(news, 14) || '<div class="bempty">No feed items name ' + esc(label) + " in this window.</div>") +
+      '</div><div class="cp-col">' +
+      card("Threat actors" + (rg === "all" ? "" : " targeting " + esc(label)), "curated profiles",
+        (actors.length ? '<ul class="cp-list">' + actors.slice(0, 8).map(actorRow).join("") + "</ul>" : '<div class="bempty">No curated profile targets ' + esc(label) + ".</div>") +
+        (aptGroups ? '<p class="cp-note">' + sheetN + ' community-sheet groups list targets ' + (rg === "all" ? "by country" : "here") + ' — see the <a href="#actors">Actors</a> directory.</p>' : "")) +
+      card("Telegram &amp; community", "unmoderated — claims, not confirmed", newsList(social, 8, true) || '<div class="bempty">No posts name ' + esc(label) + " in this window.</div>") +
+      "</div></div>";
+    return;
+  }
+
+  const cc = cpCC, name = ccName(cc);
+  const claims = scopePool(null, cc);
+  const stored = rwVictims.filter(v => v.cc === cc);
+  const { news, social } = countryMentions(cc);
+  const shown = claimsExpanded ? claims : claims.slice(0, CLAIMS_PREVIEW);
+  const claimRows = shown.map(v => "<tr>" +
+    '<td data-label="Organization">' + victimNameHtml(v.victim) + "</td>" +
+    '<td data-label="Sector" class="text-muted">' + esc(v.sector || "—") + "</td>" +
+    '<td data-label="Group">' + esc(v.group) + "</td>" +
+    '<td data-label="Claimed" class="text-muted">' + (v.date ? esc(String(v.date).slice(0, 10)) : "—") + "</td></tr>").join("");
+  const claimsCard = card("Ransomware claims · " + esc(name), "ransomware.live leak sites, newest first",
+    claims.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Claimed</th></tr></thead><tbody>' + claimRows + "</tbody></table></div>" +
+      (claims.length > CLAIMS_PREVIEW ? '<button type="button" class="btn btn-secondary cp-more" data-act="more-claims">' + (claimsExpanded ? "Show fewer" : "Show all " + claims.length) + "</button>" : "")
+    : '<div class="bempty">No claims against ' + esc(name) + " in the last " + rangeDays + " days" + (stored.length ? " (" + stored.length + " older ones stored — widen the window)." : ".") + "</div>");
 
   // Curated profiles that name this country, plus "targets everywhere" ones actually claiming here.
-  const claimGroups = new Set(allClaims.map(v => groupKey(v.group)));
+  const claimGroups = new Set(stored.map(v => groupKey(v.group)));
   const curated = mergedActors().filter(a => (a.geo || []).includes(cc) || ((a.geo || []).includes("global") && claimGroups.has(groupKey(a.name))));
   const sheet = (aptGroups || []).filter(g => g.cc.includes(cc)).sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
-  const actorsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Threat actors</div>' +
-    (curated.length ? '<ul class="cp-list">' + curated.map(a => "<li><b>" + esc(a.name) + '</b> <span class="text-muted">· ' + esc(a.motive) + " · " + esc(a.origin) + "</span>" +
-      '<div class="card-meta">' + esc(a.targets) + "</div></li>").join("") + "</ul>" : '<div class="bempty">No curated profile targets ' + esc(name) + ".</div>") +
+  const actorsCard = card("Threat actors", "",
+    (curated.length ? '<ul class="cp-list">' + curated.map(actorRow).join("") + "</ul>" : '<div class="bempty">No curated profile targets ' + esc(name) + ".</div>") +
     '<div class="card-kicker" style="margin-top:var(--space-5)">Community sheet · groups whose targets name ' + esc(name) + "</div>" +
     (aptGroups === null ? '<div class="bempty">Loading the APT groups sheet…</div>'
       : sheet.length ? '<ul class="cp-list">' + sheet.slice(0, 15).map(g => "<li><b>" + esc(g.label || g.name) + '</b> <span class="text-muted">· ' + esc(g.tab) + (g.mitre ? " · " : "") + "</span>" + (g.mitre ? aptMitreLink(g.mitre) : "") +
           (g.aliases && g.aliases.length ? '<div class="card-meta">' + esc(aptAliasText(g, 4)) + "</div>" : "") + "</li>").join("") + "</ul>" +
           (sheet.length > 15 ? '<p class="cp-note">+' + (sheet.length - 15) + ' more — search the directory on the <a href="#actors">Actors</a> tab.</p>' : "")
         : '<div class="bempty">No sheet group lists ' + esc(name) + " among its targets.</div>") +
-    '<p class="cp-note">Attribution is the sources\' call, not this app\'s — see each profile\'s confidence note on the Actors tab.</p></div>';
+    '<p class="cp-note">Attribution is the sources\' call, not this app\'s — see each profile\'s confidence note on the Actors tab.</p>');
 
-  const radarCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Measured DDoS traffic <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· Cloudflare Radar, targeting ' + esc(name) + ', 7 days</span></div><div id="cp-radar">' + radarHtml(cc) + "</div></div>";
-
-  body.innerHTML = '<div class="cp-grid"><div class="cp-col">' + claimsCard + newsCard + socialCard + "</div>" +
-    '<div class="cp-col"><div class="card elev-sm cp-card"><div class="card-kicker">Most active groups</div>' + barsHtml(groups.slice(0, 8), "No claims in this window.") + "</div>" +
-    '<div class="card elev-sm cp-card"><div class="card-kicker">Sectors hit</div>' + barsHtml(sectors.slice(0, 8), claims.length ? "No sector recorded for these claims." : "No claims in this window.") + "</div>" +
-    radarCard + actorsCard + "</div></div>";
-  loadRadar(cc);
-  updateGlobe(cc);
+  body.innerHTML = '<div class="cp-grid"><div class="cp-col">' + claimsCard +
+    card("In the news", "items naming " + esc(name) + ", its cities or country-specific terms", newsList(news, 14) || '<div class="bempty">No feed items mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") +
+    '</div><div class="cp-col">' + actorsCard +
+    card("Telegram &amp; community", "unmoderated — claims, not confirmed", newsList(social, 10, true) || '<div class="bempty">No Telegram or Mastodon posts mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") +
+    "</div></div>";
+}
+async function loadRadar(cc){
+  if (radarCache.has(cc)) return;
+  radarCache.set(cc, "loading");
+  try {
+    const r = await fetch("/api/radar?cc=" + encodeURIComponent(cc));
+    const d = await r.json();
+    radarCache.set(cc, d.error ? { error: d.error } : { data: d });
+  } catch (e){
+    radarCache.set(cc, { error: "Radar lookup failed (" + e.message + ")." });
+  }
+  if (cpCC === cc) renderDdosTelemetry();
 }
 
-/* Geo Intel hero globe — globe.gl (three.js), loaded on first visit to the tab since it's ~1.9MB.
-   Night-side Earth texture from three-globe's examples, badges = claims per victim country in the
-   window (CSS2D elements), the selected country as a large highlighted badge with a detail card.
-   Falls back to no globe (panels still work) if WebGL or the CDN isn't available. */
+/* Geo Intel globe view — globe.gl (three.js), loaded the first time the Globe view is shown since it's
+   ~1.9MB. Night-side Earth texture from three-globe's examples; badges = claims per victim country
+   in the window (CSS2D elements), the selected country as a large highlighted badge with a card;
+   the flat map's same-group arcs are drawn as animated arcs. Without WebGL or the CDN the page
+   falls back to the flat view. */
 const GLOBE_JS = "https://cdn.jsdelivr.net/npm/globe.gl@2.46.2/dist/globe.gl.min.js";
 const GLOBE_SRI = "sha384-1uolMBZ25k3zJcNwCLEv49+L+m2dZudqAzsoSAJfQTzDCSBxJzrMuZ2dkp/5JKiT";
 const GLOBE_TEXTURE = "https://cdn.jsdelivr.net/npm/three-globe@2.45.2/example/img/earth-night.jpg";
 const GLOBE_BADGES = 22;
-let cpGlobe = null, globeState = "idle", globeCC = null;
+let cpGlobe = null, globeState = "idle";
 function loadScript(src, integrity){
   return new Promise((resolve, reject) => {
     const el = document.createElement("script");
@@ -2210,7 +2265,7 @@ function webglOk(){
 async function initGlobe(){
   if (globeState !== "idle") return;
   const el = $("#cp-globe");
-  if (!el || !webglOk()){ globeState = "failed"; return; }
+  if (!el || !webglOk()){ globeState = "failed"; setView("flat"); return; }
   globeState = "loading";
   try {
     if (typeof Globe === "undefined") await loadScript(GLOBE_JS, GLOBE_SRI);
@@ -2224,32 +2279,52 @@ async function initGlobe(){
       .htmlLat("lat").htmlLng("lng").htmlAltitude(0.012)
       .htmlElement(d => d.el)
       .htmlTransitionDuration(0)
+      .arcStartLat("sLat").arcStartLng("sLng").arcEndLat("eLat").arcEndLng("eLng")
+      .arcColor(d => [d.color + "10", d.color])
+      .arcStroke(0.45)
+      .arcAltitudeAutoScale(0.35)
+      .arcDashLength(0.45).arcDashGap(1.2)
+      .arcDashAnimateTime(REDUCED_MOTION ? 0 : 2600)
+      .arcLabel(d => esc(d.group) + ": " + esc(ccName(d.from)) + " → " + esc(ccName(d.to)))
       .onGlobeClick(({ lat, lng }) => {
         const id = maskAt(lat, lng);
         const cc = id && id !== 65535 ? maskCountries[id - 1].cc : null;
         if (cc) setCountry(cc);
       });
     const ctl = g.controls();
-    ctl.enableZoom = false; // page scroll must keep working over the hero
+    ctl.enableZoom = false; // page scroll must keep working over the stage
     ctl.autoRotate = false;
     if (window.ResizeObserver) new ResizeObserver(() => { if (el.clientWidth) g.width(el.clientWidth).height(el.clientHeight); }).observe(el);
     cpGlobe = g;
     globeState = "ready";
-    globeCC = null;
-    updateGlobe(cpCC);
+    if (activeTab !== "country" || geoView !== "globe") g.pauseAnimation();
+    aimGlobe(0);
+    updateGlobe();
   } catch (e){
     globeState = "failed";
     console.warn("Geo Intel globe unavailable", e);
+    setView("flat");
   }
 }
-function updateGlobe(cc){
-  if (globeState === "idle"){ initGlobe(); return; }
-  if (!cpGlobe || !cc) return;
-  const counts = claimsByCountry(windowedClaims());
+function aimGlobe(ms){
+  if (!cpGlobe) return;
+  const dur = REDUCED_MOTION ? 0 : (ms == null ? 1400 : ms);
+  const p = cpCC && posOf(cpCC);
+  // A country is centred with latitude eased toward the equator so polar countries don't tip the
+  // globe over; a region is centred on its REGION_VIEW box.
+  if (p) cpGlobe.pointOfView({ lat: p[0] * 0.7, lng: p[1], altitude: 1.7 }, dur);
+  else {
+    const b = REGION_VIEW[currentRegion] || REGION_VIEW.all;
+    cpGlobe.pointOfView(currentRegion === "all" ? { lat: 22, lng: 40, altitude: 2.2 } : { lat: (b[2] + b[3]) / 2, lng: (b[0] + b[1]) / 2, altitude: 1.6 }, dur);
+  }
+}
+function updateGlobe(){
+  if (!cpGlobe) return;
+  const cc = cpCC;
+  const counts = mapScene.ranked || [];
   const top = counts.slice(0, GLOBE_BADGES);
-  if (!top.some(([c]) => c === cc)) top.push([cc, (counts.find(([c]) => c === cc) || [cc, 0])[1]]);
-  const sel = counts.find(([c]) => c === cc);
-  const claimsHere = windowedClaims().filter(v => v.cc === cc);
+  if (cc && !top.some(([c]) => c === cc)) top.push([cc, (counts.find(([c]) => c === cc) || [cc, 0])[1]]);
+  const claimsHere = cc ? scopePool(null, cc) : [];
   const topGroup = countByKey(claimsHere, "group")[0];
   const data = top.map(([c, n]) => {
     const p = posOf(c);
@@ -2262,45 +2337,20 @@ function updateGlobe(cc){
     b.addEventListener("click", e => { e.stopPropagation(); setCountry(c); });
     if (c === cc){
       wrap.className = "gb-sel";
-      const card = document.createElement("div");
-      card.className = "gb-card";
-      card.innerHTML = '<span class="k">' + esc(regionLabel(ccRegion(c))) + "</span><b>" + flagEmoji(c) + " " + esc(ccName(c)) + "</b>" +
-        (sel ? sel[1] + " leak-site claims in " + rangeDays + " days" + (topGroup ? "<br>Most active: " + esc(topGroup[0]) + " (" + topGroup[1] + ")" : "") : "No claims in this window");
-      wrap.appendChild(card);
+      const cardEl = document.createElement("div");
+      cardEl.className = "gb-card";
+      cardEl.innerHTML = '<span class="k">' + esc(regionLabel(ccRegion(c))) + "</span><b>" + flagEmoji(c) + " " + esc(ccName(c)) + "</b>" +
+        (claimsHere.length ? claimsHere.length + " leak-site claims in " + rangeDays + " days" + (topGroup ? "<br>Most active: " + esc(topGroup[0]) + " (" + topGroup[1] + ")" : "") : "No claims in this window");
+      wrap.appendChild(cardEl);
     }
     wrap.appendChild(b);
     return { lat: p[0], lng: p[1], el: wrap };
   }).filter(Boolean);
   cpGlobe.htmlElementsData(data);
-  if (cc !== globeCC){
-    globeCC = cc;
-    const p = posOf(cc);
-    // Centre the country on the disc; latitude is eased toward the equator so polar countries
-    // don't tip the globe over.
-    if (p) cpGlobe.pointOfView({ lat: p[0] * 0.7, lng: p[1], altitude: 2.1 }, REDUCED_MOTION ? 0 : 1400);
-  }
-}
-function radarHtml(cc){
-  const r = radarCache.get(cc);
-  if (!r || r === "loading") return '<div class="bempty">Loading…</div>';
-  if (r.error) return '<div class="bempty">' + esc(r.error) + "</div>";
-  const rows = list => list.length ? list.map(x => '<div class="cp-bar"><span>' + esc(x.label) + "</span><b>" + x.pct.toFixed(1) + '%</b><div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.min(100, x.pct) + '%"></div></div></div>').join("") : '<div class="bempty">None recorded.</div>';
-  return '<div class="apj-eyebrow" style="margin-bottom:6px">L3/L4 attack vectors</div>' + rows(r.data.l3) +
-    '<div class="apj-eyebrow" style="margin:12px 0 6px">L7 HTTP methods</div>' + rows(r.data.l7) +
-    '<p class="cp-note">Share of attack traffic by type — not attack counts, and not confirmation of any claim above.</p>';
-}
-async function loadRadar(cc){
-  if (radarCache.has(cc)) return;
-  radarCache.set(cc, "loading");
-  try {
-    const r = await fetch("/api/radar?cc=" + encodeURIComponent(cc));
-    const d = await r.json();
-    radarCache.set(cc, d.error ? { error: d.error } : { data: d });
-  } catch (e){
-    radarCache.set(cc, { error: "Radar lookup failed (" + e.message + ")." });
-  }
-  const el = $("#cp-radar");
-  if (el && cpCC === cc) el.innerHTML = radarHtml(cc);
+  cpGlobe.arcsData((mapScene.arcs || []).map(a => {
+    const f = posOf(a.from), t = posOf(a.to);
+    return f && t ? { sLat: f[0], sLng: f[1], eLat: t[0], eLng: t[1], color: a.color, group: a.group, from: a.from, to: a.to } : null;
+  }).filter(Boolean));
 }
 function wireCountry(){
   const form = $("#cp-form"), input = $("#cp-search");
@@ -2314,21 +2364,11 @@ function wireCountry(){
     const cc = resolveCountry(input.value, false);
     if (cc && ccName(cc).toLowerCase() === input.value.trim().toLowerCase()){ setCountry(cc); input.value = ""; }
   });
-  const mapLink = $("#cp-map");
-  if (mapLink) mapLink.addEventListener("click", e => {
-    if (!cpCC) return;
-    e.preventDefault();
-    showTab("map");
-    focusCountry(cpCC);
-  });
-  const profile = $("#dg-profile");
-  if (profile) profile.addEventListener("click", e => {
-    const cc = parseHash(profile.getAttribute("href")).cc;
-    if (!cc) return;
-    e.preventDefault();
-    setCountry(cc, { skipRender: true });
-    showTab("country");
-    window.scrollTo(0, 0);
+  const body = $("#cp-body");
+  if (body) body.addEventListener("click", e => {
+    if (!e.target.closest('[data-act="more-claims"]')) return;
+    claimsExpanded = !claimsExpanded;
+    renderGeoBody();
   });
 }
 
@@ -2345,11 +2385,9 @@ function setGeo(key){
   currentRegion = geo;
   try { localStorage.setItem("apjti.geo", geo); } catch (_){}
   syncGeoUi();
-  mapScene.focus = null;
-  if (mapTarget) setMapTarget(REGION_VIEW[geo] || REGION_VIEW.all);
-  const input = $("#dg-locate");
-  if (input) input.value = "";
-  syncMapProfileLink(null);
+  cpCC = null; // a new region goes back to its overview on Geo Intel
+  claimsExpanded = false;
+  if (activeTab === "country") history.replaceState(null, "", "#country");
   renderActors();
   renderApt();
   renderAll();
@@ -2357,8 +2395,6 @@ function setGeo(key){
 
 /* ---------------- Init ---------------- */
 async function renderAll(){
-  renderCountryChips();
-  if (activeTab === "country") renderCountry();
   renderRw();
   renderRansomwareNews();
   renderTelegram();
@@ -2388,7 +2424,8 @@ async function init(){
   const h = parseHash(location.hash);
   if (h.cc) cpCC = h.cc;
   const startTab = TAB_IDS.includes(h.id) ? h.id : (localStorage.getItem("apjti.tab") || "brief");
-  showTab(startTab, { skipHash: !(h.id === "country" && !h.cc) });
+  // Rewrite the hash only when it doesn't already name this view (e.g. an old "#map" link).
+  showTab(startTab, { skipHash: location.hash === "#" + startTab + (h.cc ? "/" + h.cc : "") });
 
   try {
     await loadData();
