@@ -203,8 +203,18 @@
     <div class="dg-analytics">
       <div class="dg-achart"><h4>Top groups <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
       <div class="dg-achart"><h4>Top sectors <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
-      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span id="radar-scope">Cloudflare Radar · worldwide · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
     </div>
+
+    <section class="dg-ddos" aria-labelledby="ddos-title">
+      <div class="dg-ddos-hd">
+        <h3 id="ddos-title">DDoS intelligence</h3>
+        <span class="dg-panel-meta" id="ddos-scope">worldwide</span>
+      </div>
+      <p class="dg-ddos-lede">Three different signals, side by side. None of them confirms another: a claim is self-reported, Radar measures attack traffic in general (not any one attack), and a network going dark has many possible causes.</p>
+      <div class="dg-ddos-trio" id="ddos-trio"></div>
+      <div class="dg-ddos-grid" id="ddos-grid"><div class="empty">Loading…</div></div>
+      <p class="dg-note" id="ddos-note"></p>
+    </section>
 
     <div id="cp-body" class="cp-body"><div class="empty">Loading…</div></div>
     <div class="dg-note" id="dash-cov"></div>
@@ -418,7 +428,7 @@
 <footer class="site-foot">
   <div class="foot-grid">
     <div>
-      <strong>Auto-collected every 30 min:</strong> BleepingComputer, The Hacker News, SANS ISC, Infosecurity Magazine, Akamai Blog, JPCERT/CC, Unit 42, Talos, Securelist, CISA Advisories, Krebs on Security, Dark Reading, Cyble, NCSC UK, ransomware.live, CISA KEV, GitHub Security Advisories, NVD (CVSS 7+), EPSS, OpenPhish, MISP (CIRCL OSINT), Telegram (CTI Now, Cyber Detective, AVLeonov, Ummah Sec, Hackmanac), Mastodon (#ransomware, ransomwatch)<span id="foot-abusech"></span><span id="foot-radar"></span>.
+      <strong>Auto-collected every 30 min:</strong> BleepingComputer, The Hacker News, SANS ISC, Infosecurity Magazine, Akamai Blog, JPCERT/CC, Unit 42, Talos, Securelist, CISA Advisories, Krebs on Security, Dark Reading, Cyble, NCSC UK, ransomware.live, CISA KEV, GitHub Security Advisories, NVD (CVSS 7+), EPSS, OpenPhish, MISP (CIRCL OSINT), Telegram (CTI Now, Cyber Detective, AVLeonov, Ummah Sec, Hackmanac), Mastodon (#ransomware, ransomwatch), IODA internet outages (Georgia Tech)<span id="foot-abusech"></span><span id="foot-radar"></span>.
       <div style="margin-top:var(--space-2)"><strong>Check manually:</strong>
         <a href="https://www.cert-in.org.in/" target="_blank" rel="noopener">CERT-In</a> ·
         <a href="https://cyble.com/blog/" target="_blank" rel="noopener">Cyble</a> ·

@@ -1748,35 +1748,157 @@ function selectRegion(key){
   if (key !== geo){ setGeo(key); return; }
   setCountry(null);
 }
-// Real (not claimed) DDoS attack traffic from Cloudflare Radar: worldwide from the stored blob, or the
-// selected country's breakdown via /api/radar (loadRadar(), cached per country).
+/* DDoS intelligence section: three independent signals for the current scope, never merged into one.
+   - Claimed: Telegram posts about DDoS (self-reported, from the stored `telegram` array).
+   - Measured: Cloudflare Radar attack traffic (percentages of attack traffic, not attack counts).
+   - Disrupted: IODA connectivity drops + Radar's verified outage notes (any cause, not just attacks).
+   Worldwide/region data comes from the KV blob (ddosTelemetry, outages); a country's comes from
+   /api/radar?cc= (loadRadar(), cached per country). */
+const RE_DDOS_POST = /\bddos|\bd\.d\.o\.s|denial[- ]of[- ]service|\bddosed\b|taken offline|knocked offline|brought down|\bflood(?:ed|ing)?\b/i;
+const IODA_URL = "https://ioda.inetintel.cc.gatech.edu/";
+const OUTAGE_CAUSE = { GOVERNMENT_DIRECTED: "Government-directed", CABLE_CUT: "Cable cut", POWER_OUTAGE: "Power outage", TECHNICAL_PROBLEM: "Technical problem", WEATHER: "Weather", MILITARY_ACTION: "Military action", CYBERATTACK: "Cyberattack", MAINTENANCE: "Maintenance", FIRE: "Fire", EARTHQUAKE: "Earthquake", UNKNOWN: "Cause unknown" };
+function ddosPosts(rg, cc){
+  const a = maxDate(telegramItems.map(i => i.date));
+  // NFKC folds the Unicode "bold" letters some channels use in headlines (𝗗𝗗𝗼𝗦) back to ASCII.
+  return newest(telegramItems.filter(i => RE_DDOS_POST.test((i.title + " " + (i.desc || "")).normalize("NFKC")) &&
+    (cc ? i.cc.includes(cc) : rg === "all" || i.rg.includes(rg)) && (!a || inWindow(i.date, a.getTime()))));
+}
 function renderDdosTelemetry(){
-  const el = $("#radar-ddos");
-  if (!el) return;
-  const scopeEl = $("#radar-scope");
-  if (scopeEl) scopeEl.textContent = "Cloudflare Radar · " + (cpCC ? ccName(cpCC) : "worldwide") + " · measured, not claimed";
-  const rowHtml = r => '<div class="radar-row"><span class="radar-label">' + esc(r.label) + '</span>' +
+  const grid = $("#ddos-grid"), trio = $("#ddos-trio");
+  if (!grid || !trio) return;
+  const cc = cpCC, rg = currentRegion;
+  const where = cc ? ccName(cc) : rg === "all" ? "worldwide" : regionLabel(rg);
+  $("#ddos-scope").textContent = where + " · last 7 days unless noted";
+
+  const pctTxt = v => v > 0 && v < 0.1 ? "<0.1%" : v.toFixed(1) + "%";
+  const pctRow = r => '<div class="radar-row"><span class="radar-label" title="' + esc(r.label) + '">' + esc(r.label) + '</span>' +
     '<span class="radar-bar"><span class="radar-fill" style="width:' + Math.min(100, r.pct) + '%"></span></span>' +
-    '<span class="radar-pct">' + r.pct.toFixed(1) + "%</span></div>";
-  const colHtml = (list, empty) => list.length ? list.map(rowHtml).join("") : '<div class="empty">' + empty + "</div>";
-  let l3, l7, where;
-  if (cpCC){
-    const r = radarCache.get(cpCC);
-    if (!r || r === "loading"){ el.innerHTML = '<div class="empty">Loading Radar data for ' + esc(ccName(cpCC)) + "…</div>"; loadRadar(cpCC); return; }
-    if (r.error){ el.innerHTML = '<div class="empty">' + esc(r.error) + "</div>"; return; }
-    l3 = r.data.l3; l7 = r.data.l7; where = "targeting " + ccName(cpCC);
-  } else {
-    const dt = DATA.ddosTelemetry;
-    l3 = (dt && dt.l3 && dt.l3.global) || []; l7 = (dt && dt.l7 && dt.l7.global) || []; where = "worldwide";
-    if (!l3.length && !l7.length){
-      el.innerHTML = '<div class="empty">No Cloudflare Radar data cached yet — set CF_RADAR_TOKEN (free Account &gt; Radar &gt; Read token) to enable real, measured DDoS attack-traffic telemetry alongside the claims above.</div>';
+    '<span class="radar-pct">' + pctTxt(r.pct) + "</span></div>";
+  // Country rows link to that country's profile; bars scale to the list's own max so small shares stay visible.
+  const ccRows = (list, fmt) => { const max = Math.max(...list.map(r => r.pct), 0.001); return list.map(r =>
+    '<a class="radar-row radar-link" href="#country/' + esc(r.cc) + '"><span class="radar-label">' + flagEmoji(r.cc) + " " + esc(ccName(r.cc)) + '</span>' +
+    '<span class="radar-bar"><span class="radar-fill" style="width:' + (r.pct / max * 100).toFixed(1) + '%"></span></span>' +
+    '<span class="radar-pct">' + (fmt ? fmt(r) : pctTxt(r.pct)) + "</span></a>").join(""); };
+  const sub = (title, inner) => '<div class="ddos-sub"><div class="radar-col-hd">' + title + "</div>" + inner + "</div>";
+  const col = (...panels) => '<div class="ddos-col">' + panels.join("") + "</div>";
+  const list = (rows, empty) => rows && rows.length ? rows : '<div class="empty">' + empty + "</div>";
+  const panel = (title, meta, inner, cls) => '<div class="dg-achart ' + (cls || "") + '"><h4>' + title + (meta ? " <span>" + meta + "</span>" : "") + "</h4>" + inner + "</div>";
+  const tile = (label, value, detail, cls) => '<div class="ddos-tile ' + (cls || "") + '"><div class="l">' + label + '</div><div class="v">' + value + '</div><div class="s">' + detail + "</div></div>";
+  const inScope = c => rg === "all" || ccRegion(c) === rg;
+  const fmtDay = iso => iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  const fmtSpan = (s, e) => { const m = Math.round((new Date(e) - new Date(s)) / 60000); return m >= 1440 ? Math.round(m / 1440) + " d" : m >= 60 ? Math.round(m / 60) + " h" : m + " min"; };
+  const noToken = '<div class="empty">Cloudflare Radar isn\'t configured — set CF_RADAR_TOKEN (free Account &gt; Radar &gt; Read token).</div>';
+
+  // Claimed — same for both modes, only the scope differs.
+  const posts = ddosPosts(rg, cc);
+  const postList = posts.length ? '<ul class="cp-list ddos-posts">' + posts.slice(0, 6).map(i =>
+    '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a>" +
+    '<div class="card-meta">' + esc(i.channel || i.src) + (i.date ? " · " + fmtDate(i.date) : "") + (i.claim ? ' · <span class="tag tag-accent">Actor claim</span>' : "") + "</div></li>").join("") + "</ul>"
+    : '<div class="empty">No Telegram posts about DDoS ' + (cc || rg !== "all" ? "name " + esc(where) + " " : "") + "in the last " + rangeDays + " days.</div>";
+  const claimsPanel = panel("DDoS claims &amp; chatter", "Telegram · self-reported", postList);
+  const claimTile = tile("Claimed", String(posts.length), "Telegram posts about DDoS · " + rangeDays + "d", "hot");
+
+  if (cc){
+    const r = radarCache.get(cc);
+    if (!r || r === "loading"){
+      trio.innerHTML = claimTile + tile("Measured", "…", "Cloudflare Radar") + tile("Disrupted", "…", "IODA");
+      grid.innerHTML = claimsPanel + '<div class="dg-achart"><div class="empty">Loading attack traffic and outage data for ' + esc(where) + "…</div></div>";
+      loadRadar(cc);
       return;
     }
+    if (r.error){
+      trio.innerHTML = claimTile + tile("Measured", "—", "unavailable") + tile("Disrupted", "—", "unavailable");
+      grid.innerHTML = claimsPanel + '<div class="dg-achart"><div class="empty">' + esc(r.error) + "</div></div>";
+      $("#ddos-note").innerHTML = ddosSourcesNote();
+      return;
+    }
+    const d = r.data;
+    const configured = !(d.radar && d.radar.configured === false);
+    const series = d.series || [];
+    const peak = series.reduce((m, p) => (!m || p.v > m.v ? p : m), null);
+    // This country's share of worldwide L3/L4 attack traffic, from the stored top-50 list; below the
+    // 50th entry all we can say is "less than the 50th".
+    const targets = (DATA.ddosTelemetry && DATA.ddosTelemetry.l3Targets) || [];
+    const worldShare = targets.find(t => t.cc === cc), floor = targets[targets.length - 1];
+    const measured = !configured ? ["—", "Radar not configured"]
+      : worldShare ? [worldShare.pct.toFixed(1) + "%", "of worldwide L3/L4 attack traffic targeted " + esc(where)]
+      : floor ? ["&lt;" + Math.max(floor.pct, 0.1).toFixed(1) + "%","of worldwide L3/L4 attack traffic · outside the top 50"]
+      : ["—", "worldwide ranking collected on the next cycle"];
+    const ioda = d.ioda || { events: [], networks: [] };
+    const outages = d.outages || [];
+    const lastEv = ioda.events[0];
+    trio.innerHTML = claimTile +
+      tile("Measured", measured[0], measured[1]) +
+      tile("Disrupted", String(ioda.events.length), ioda.events.length ? "IODA connectivity drops · 28d · last " + fmtDay(lastEv.start) : "no IODA connectivity drops in 28 days");
+
+    const bars = series.length ? '<div class="ddos-spark" role="img" aria-label="Daily L3/L4 attack traffic targeting ' + esc(where) + ', last 28 days, peak ' + esc(peak ? peak.d : "") + '">' +
+      series.map(p => '<i style="height:' + Math.max(3, p.v * 100).toFixed(0) + '%"' + (p === peak ? ' class="pk"' : "") + ' title="' + esc(p.d) + " · " + Math.round(p.v * 100) + '% of the 28-day peak"></i>').join("") + "</div>" +
+      '<div class="ddos-spark-axis"><span>' + esc(fmtDay(series[0].d)) + "</span><span>peak " + esc(fmtDay(peak.d)) + "</span><span>" + esc(fmtDay(series[series.length - 1].d)) + "</span></div>" : "";
+    const outageNotes = outages.length ? '<ul class="cp-list ddos-posts">' + outages.slice(0, 4).map(o => "<li>" + (o.link ? '<a href="' + esc(o.link) + '" target="_blank" rel="noopener">' + esc(o.desc || "Outage") + "</a>" : esc(o.desc || "Outage")) +
+      '<div class="card-meta">' + esc(OUTAGE_CAUSE[o.cause] || o.cause) + " · " + esc(fmtDay(o.start)) + (o.end ? " · " + esc(fmtSpan(o.start, o.end)) : "") + "</div></li>").join("") + "</ul>" : "";
+
+    const originsPanel = configured ? panel("Where attacks on " + esc(where) + " come from", "Cloudflare Radar",
+        sub("L3/L4 · share of attack traffic by source", list(ccRows(d.l3Origins || []), "No L3/L4 attack traffic recorded.")) +
+        sub("L7 (HTTP) · share of attack traffic by source", list(ccRows(d.l7Origins || []), "No L7 attack traffic recorded.")) +
+        '<p class="cp-note">Where Cloudflare saw the traffic come from. L3/L4 source addresses are often spoofed, and either kind can be relayed through other countries.</p>')
+        : panel("Measured attack traffic", "Cloudflare Radar", noToken);
+    const targetPanel = configured ? panel("Attacks targeting " + esc(where), "L3/L4 · Cloudflare Radar",
+        (bars ? sub("Daily volume · 28 days, relative to its peak", bars) : "") +
+        sub("Attack vectors", list((d.l3 || []).map(pctRow).join(""), "No L3/L4 attack traffic recorded.")) +
+        '<div class="ddos-two">' + sub("Size", list((d.bitrate || []).map(pctRow).join(""), "—")) + sub("Duration", list((d.duration || []).map(pctRow).join(""), "—")) + "</div>") : "";
+    const outagePanel = panel("Internet disruptions in " + esc(where), "IODA · Radar outage notes",
+        sub("Connectivity drops · last 28 days", ioda.events.length ? '<ul class="cp-list ddos-posts">' + ioda.events.slice(0, 6).map(e =>
+          "<li>" + esc(new Date(e.start).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })) + " UTC · " + esc(fmtSpan(e.start, e.end)) +
+          '<div class="card-meta">seen in ' + esc(e.sources.join(", ")) + "</div></li>").join("") + "</ul>"
+          : '<div class="empty">' + (ioda.ok === false ? "IODA didn't answer — try again later." : "No country-wide connectivity drops.") + "</div>") +
+        (ioda.networks.length ? sub("Networks with drops · last 7 days", '<ul class="cp-list ddos-posts">' + ioda.networks.slice(0, 6).map(n =>
+          "<li>" + esc(n.name) + '<div class="card-meta">' + n.events + " event" + (n.events === 1 ? "" : "s") + "</div></li>").join("") + "</ul>") : "") +
+        (outageNotes ? sub("Verified by Cloudflare Radar · 28 days", outageNotes) : "") +
+        '<p class="cp-note">A drop says a network went dark, not why. Check the cause before tying one to a claim. <a href="' + IODA_URL + "country/" + esc(cc) + '" target="_blank" rel="noopener">IODA dashboard for ' + esc(where) + " ↗</a></p>");
+    grid.innerHTML = col(claimsPanel, outagePanel) + col(originsPanel) + col(targetPanel);
+    $("#ddos-note").innerHTML = ddosSourcesNote();
+    return;
   }
-  el.innerHTML =
-    '<div><div class="radar-col-hd">L3/L4 attack vectors, ' + esc(where) + " (7d)</div>" + colHtml(l3, "No L3/L4 attack traffic recorded.") + "</div>" +
-    '<div><div class="radar-col-hd">L7 HTTP methods, ' + esc(where) + " (7d)</div>" + colHtml(l7, "No L7 attack traffic recorded.") + "</div>" +
-    '<p class="cp-note" style="grid-column:1/-1">Share of attack traffic by type — not attack counts, and not confirmation of any claim.' + (cpCC ? "" : " Pick a country for its own breakdown.") + "</p>";
+
+  // Overview (world or region): the stored worldwide lists, narrowed to the region.
+  const dt = DATA.ddosTelemetry;
+  const og = DATA.outages || {};
+  const targets = ((dt && dt.l3Targets) || []).filter(t => inScope(t.cc));
+  const pairs = ((dt && dt.l7Pairs) || []).filter(p => inScope(p.to) || inScope(p.from));
+  const iodaRows = (og.ioda || []).filter(e => /^[A-Z]{2}$/.test(e.code) && inScope(e.code));
+  const radarOut = (og.radar || []).filter(o => rg === "all" ? true : o.cc.some(inScope));
+  const top = targets[0];
+  trio.innerHTML = claimTile +
+    tile("Measured", top ? flagEmoji(top.cc) + " " + esc(ccName(top.cc)) : "—", top ? "most targeted · " + top.pct.toFixed(1) + "% of worldwide L3/L4 attack traffic"
+      : !dt ? "Radar not configured" : !dt.l3Targets ? "ranking collected on the next 30-min cycle" : "no country in scope in Radar's top 50") +
+    tile("Disrupted", DATA.outages ? String(iodaRows.length) : "—", DATA.outages ? "countries with IODA connectivity drops · 7d" : "collected on the next 30-min cycle");
+  const maxEvents = Math.max(...iodaRows.map(e => e.events), 1);
+  const wherePanel = dt && dt.l3Targets ? panel("Most attacked countries", "L3/L4 · share of worldwide attack traffic",
+      list(ccRows(targets.slice(0, 8)), "No country in scope is in Radar's top 50 targets.") +
+      sub("Top L7 attack routes · source → target", pairs.length ? pairs.slice(0, 6).map(p =>
+        '<div class="radar-row radar-route"><span class="radar-label">' + flagEmoji(p.from) + " " + esc(ccName(p.from)) + ' <span class="tk-arrow">→</span> ' + flagEmoji(p.to) + " " + esc(ccName(p.to)) + '</span><span class="radar-pct">' + p.pct.toFixed(1) + "%</span></div>").join("") : '<div class="empty">No top route touches ' + esc(where) + ".</div>"))
+      : panel("Measured attack traffic", "Cloudflare Radar", dt ? '<div class="empty">Collected before this panel existed — fills in on the next 30-min cycle.</div>' : noToken);
+  const whatPanel = dt ? panel("What the attacks look like", "worldwide · Cloudflare Radar",
+      '<div class="ddos-two">' + sub("L3/L4 vectors", list(((dt.l3 && dt.l3.global) || []).slice(0, 6).map(pctRow).join(""), "—")) + sub("L7 HTTP methods", list(((dt.l7 && dt.l7.global) || []).slice(0, 6).map(pctRow).join(""), "—")) + "</div>" +
+      (dt.bitrate && dt.bitrate.length ? '<div class="ddos-two">' + sub("Size", dt.bitrate.map(pctRow).join("")) + sub("Duration", (dt.duration || []).map(pctRow).join("")) + "</div>" : "") +
+      (dt.l7Industries && dt.l7Industries.length ? sub("Most targeted industries · L7", dt.l7Industries.slice(0, 6).map(pctRow).join("")) : "")) : "";
+  const outagePanel = panel("Internet disruptions", "IODA · Radar outage notes",
+      sub("Countries with connectivity drops · 7 days", iodaRows.length ? iodaRows.slice(0, 8).map(e =>
+        '<a class="radar-row radar-link" href="#country/' + esc(e.code) + '"><span class="radar-label">' + flagEmoji(e.code) + " " + esc(ccName(e.code)) + '</span>' +
+        '<span class="radar-bar"><span class="radar-fill" style="width:' + (e.events / maxEvents * 100).toFixed(1) + '%"></span></span>' +
+        '<span class="radar-pct">' + e.events + " ev</span></a>").join("") : '<div class="empty">' + (DATA.outages ? "No drops recorded in " + esc(where) + "." : "Collected on the next 30-min cycle.") + "</div>") +
+      (radarOut.length ? sub("Verified by Cloudflare Radar · 28 days", '<ul class="cp-list ddos-posts">' + radarOut.slice(0, 5).map(o => "<li>" +
+        (o.link ? '<a href="' + esc(o.link) + '" target="_blank" rel="noopener">' + esc(o.desc || "Outage") + "</a>" : esc(o.desc || "Outage")) +
+        '<div class="card-meta">' + esc(OUTAGE_CAUSE[o.cause] || o.cause) + (o.cc.length ? " · " + o.cc.map(c => esc(ccName(c))).join(", ") : "") + " · " + esc(fmtDay(o.start)) + "</div></li>").join("") + "</ul>") : "") +
+      '<p class="cp-note">Ordered by IODA\'s severity score; bars and "ev" show the number of drop events. A drop has many possible causes. Pick a country to see its timeline.</p>');
+  grid.innerHTML = col(claimsPanel, outagePanel) + col(wherePanel) + col(whatPanel);
+  $("#ddos-note").innerHTML = ddosSourcesNote();
+}
+function ddosSourcesNote(){
+  const t = DATA.ddosTelemetry && DATA.ddosTelemetry.generated, o = DATA.outages && DATA.outages.generated;
+  return 'Sources: <a href="https://radar.cloudflare.com/" target="_blank" rel="noopener">Cloudflare Radar</a> (shares of attack traffic Cloudflare mitigated, not attack counts)' +
+    (t ? ", updated " + esc(new Date(t).toLocaleString()) : "") + ' · <a href="' + IODA_URL + '" target="_blank" rel="noopener">IODA</a>, Georgia Tech Research Corporation (connectivity drops, any cause)' +
+    (o ? ", updated " + esc(new Date(o).toLocaleString()) : "") + " · Telegram (self-reported). Country views are cached for 6 hours.";
 }
 function renderDashStats(regionKey, focusCC){
   const el = $("#dg-stats");

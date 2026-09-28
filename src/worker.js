@@ -1022,51 +1022,168 @@ async function enrichEpss(vulnerabilities, sourceStatus){
 // needed. `result.summary_0` is Radar's map of dimension-value -> percentage string; parsed to numbers
 // here so the frontend doesn't need to. Returns null (not throw) on any failure so one bad call
 // doesn't take down its sibling in collectDdosTelemetry()'s / radarForCountry()'s Promise.all.
-async function fetchRadarSummary(token, layer, dimension, location){
-  const params = new URLSearchParams({ dateRange: "7d", direction: "TARGET", format: "json" });
-  if (location) params.set("location", location);
-  const url = RADAR_API_BASE + "/attacks/" + layer + "/summary/" + dimension + "?" + params.toString();
+// One Radar API call → its `result` object, or null on any failure (never throws), so one bad call
+// doesn't take down its siblings in a Promise.all.
+async function radarGet(token, path, params){
+  const url = RADAR_API_BASE + "/" + path + "?" + new URLSearchParams(Object.assign({ format: "json" }, params)).toString();
   try {
     const r = await fetchWithTimeout(url, { headers: { "Authorization": "Bearer " + token, "User-Agent": UA } });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
     if (!j.success) throw new Error((j.errors && j.errors[0] && j.errors[0].message) || "Radar API error");
-    const summary = (j.result && j.result.summary_0) || {};
-    return Object.entries(summary)
-      .map(([label, pct]) => [label, parseFloat(pct)])
-      .filter(([, pct]) => !isNaN(pct))
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([label, pct]) => ({ label, pct }));
+    return j.result || null;
   } catch (e){ return null; }
 }
+// `summary_0` → [{ label, pct }]. With `order` (bucketed dimensions like bitrate/duration) rows keep
+// that order and get readable labels; otherwise they're sorted by share, top 8.
+function parseRadarSummary(result, order){
+  if (!result) return null;
+  const rows = Object.entries(result.summary_0 || {}).map(([label, pct]) => ({ label, pct: parseFloat(pct) })).filter(r => !isNaN(r.pct));
+  if (order) return Object.keys(order).map(k => ({ label: order[k], pct: (rows.find(r => r.label === k) || { pct: 0 }).pct }));
+  return rows.sort((a, b) => b.pct - a.pct).slice(0, 8);
+}
+// top/locations/{origin,target} and top/attacks rows → { cc, pct } or { from, to, pct }.
+function parseRadarTop(result){
+  if (!result) return null;
+  return (result.top_0 || []).map(r => {
+    const pct = parseFloat(r.value);
+    if (r.originCountryAlpha2 && r.targetCountryAlpha2) return { from: r.originCountryAlpha2, to: r.targetCountryAlpha2, pct };
+    return { cc: r.targetCountryAlpha2 || r.originCountryAlpha2, pct };
+  }).filter(r => !isNaN(r.pct) && (r.cc || r.from));
+}
+function parseRadarIndustries(result){
+  if (!result) return null;
+  return (result.top_0 || []).map(r => ({ label: r.name, pct: parseFloat(r.value) })).filter(r => r.label && !isNaN(r.pct));
+}
+// Daily timeseries → [{ d: "YYYY-MM-DD", v }]. Radar min-max normalises it (0..1), so it shows shape
+// over time — which days were worst — not volume.
+function parseRadarSeries(result){
+  if (!result || !result.serie_0) return null;
+  const s = result.serie_0;
+  return (s.timestamps || []).map((t, i) => ({ d: String(t).slice(0, 10), v: parseFloat(s.values[i]) })).filter(p => !isNaN(p.v));
+}
+// Radar's hand-verified outage annotations (cause, scope, affected countries).
+function parseRadarOutages(result){
+  if (!result) return null;
+  return (result.annotations || []).map(a => ({
+    start: a.startDate || null, end: a.endDate || null,
+    desc: String(a.description || "").slice(0, 300),
+    cause: (a.outage && a.outage.outageCause) || "UNKNOWN",
+    scope: (a.outage && a.outage.outageType) || null,
+    cc: (a.locations || []).filter(c => /^[A-Z]{2}$/.test(c)),
+    asns: (a.asns || []).length,
+    link: a.linkedUrl || null
+  }));
+}
+const RADAR_BITRATE = { UNDER_500_MBPS: "< 500 Mbps", _500_MBPS_TO_1_GBPS: "0.5–1 Gbps", _1_GBPS_TO_10_GBPS: "1–10 Gbps", _10_GBPS_TO_100_GBPS: "10–100 Gbps", OVER_100_GBPS: "> 100 Gbps" };
+const RADAR_DURATION = { UNDER_10_MINS: "< 10 min", _10_MINS_TO_20_MINS: "10–20 min", _20_MINS_TO_40_MINS: "20–40 min", _40_MINS_TO_1_HOUR: "40–60 min", _1_HOUR_TO_3_HOURS: "1–3 h", OVER_3_HOURS: "> 3 h" };
 
-// Real (measured, not claimed) DDoS attack-traffic composition from Cloudflare Radar — see the
-// constants above for the claimed-vs-confirmed caveat. Gated behind env.CF_RADAR_TOKEN; returns null
-// (not an empty object) when unset or when every call fails, so collect() can fall back to whatever
-// was in the previous cycle's KV rather than blanking out a working panel over a transient API hiccup.
-// Worldwide only: per-country breakdowns are fetched on demand by GET /api/radar?cc= (radarForCountry())
-// for the Country page, rather than picking one country to collect on every cycle.
+// Kept for the named exports; the same call collectDdosTelemetry() makes for the vector/method breakdowns.
+async function fetchRadarSummary(token, layer, dimension, location){
+  const params = { dateRange: "7d", direction: "TARGET" };
+  if (location) params.location = location;
+  return parseRadarSummary(await radarGet(token, "attacks/" + layer + "/summary/" + dimension, params));
+}
+
+// Real (measured, not claimed) DDoS attack traffic from Cloudflare Radar — see the constants above
+// for the claimed-vs-confirmed caveat. Gated behind env.CF_RADAR_TOKEN; returns null (not an empty
+// object) when unset or when every call fails, so collect() can fall back to the previous cycle's KV.
+// Worldwide only (8 subrequests); per-country views come from GET /api/radar?cc= (radarForCountry()).
+// Location lists are fetched deep (limit 50) so the frontend can narrow them to one region.
+//
+// Direction semantics differ by layer, checked against the API: for L3, `location` is the TARGET
+// country. For L7 it's the SOURCE of the mitigated requests and `direction` is ignored, so L7 per-
+// country questions ("who attacks X") have to go through top/attacks with limitDirection=TARGET.
 async function collectDdosTelemetry(env, sourceStatus){
   if (!env.CF_RADAR_TOKEN) return null;
-  const token = env.CF_RADAR_TOKEN;
-  const [l3Global, l7Global] = await Promise.all([
-    fetchRadarSummary(token, "layer3", RADAR_L3_DIMENSION, null),
-    fetchRadarSummary(token, "layer7", RADAR_L7_DIMENSION, null)
+  const t = env.CF_RADAR_TOKEN, wk = { dateRange: "7d" };
+  const [l3, l7, targets, origins, pairs, industries, bitrate, duration] = await Promise.all([
+    radarGet(t, "attacks/layer3/summary/" + RADAR_L3_DIMENSION, wk).then(r => parseRadarSummary(r)),
+    radarGet(t, "attacks/layer7/summary/" + RADAR_L7_DIMENSION, wk).then(r => parseRadarSummary(r)),
+    radarGet(t, "attacks/layer3/top/locations/target", Object.assign({ limit: 50 }, wk)).then(parseRadarTop),
+    radarGet(t, "attacks/layer3/top/locations/origin", Object.assign({ limit: 50 }, wk)).then(parseRadarTop),
+    radarGet(t, "attacks/layer7/top/attacks", Object.assign({ limit: 50 }, wk)).then(parseRadarTop),
+    radarGet(t, "attacks/layer7/top/industry", Object.assign({ limit: 8 }, wk)).then(parseRadarIndustries),
+    radarGet(t, "attacks/layer3/summary/bitrate", wk).then(r => parseRadarSummary(r, RADAR_BITRATE)),
+    radarGet(t, "attacks/layer3/summary/duration", wk).then(r => parseRadarSummary(r, RADAR_DURATION))
   ]);
-  const ok = [l3Global, l7Global].filter(Boolean).length;
-  sourceStatus["Cloudflare Radar"] = { ok: ok > 0, count: ok + "/2 breakdowns" };
+  const parts = [l3, l7, targets, origins, pairs, industries, bitrate, duration];
+  const ok = parts.filter(Boolean).length;
+  sourceStatus["Cloudflare Radar"] = { ok: ok > 0, count: ok + "/" + parts.length + " breakdowns" };
   if (!ok) return null;
   return {
     generated: new Date().toISOString(),
-    l3: { global: l3Global || [] },
-    l7: { global: l7Global || [] }
+    l3: { global: l3 || [] },
+    l7: { global: l7 || [] },
+    l3Targets: targets || [], l3Origins: origins || [], l7Pairs: pairs || [],
+    l7Industries: industries || [], bitrate: bitrate || [], duration: duration || []
   };
 }
 
-// GET /api/radar?cc=XX — the same two breakdowns for attack traffic targeting one country. Public
-// endpoint on our Radar token, so the country code is validated and each answer is cached at the
-// edge (Cache API, no KV writes) for RADAR_CC_CACHE_S, like /api/ip-check.
+// IODA (Internet Outage Detection and Analysis, Georgia Tech) — free, no key. Detects connectivity
+// drops per country / region / network from BGP, active probing and darknet traffic. It says a network
+// went dark, not why — power cuts, shutdowns and cable faults look the same as a successful DDoS — so
+// it's shown next to claims as "was anything actually disrupted", never as confirmation of an attack.
+// Data © Georgia Tech Research Corporation; the UI attributes and links it.
+const IODA_API_BASE = "https://api.ioda.inetintel.cc.gatech.edu/v2";
+async function iodaGet(path, params){
+  try {
+    const j = await fetchJson(IODA_API_BASE + "/" + path + "?" + new URLSearchParams(params).toString());
+    return j && !j.error ? j.data : null;
+  } catch (e){ return null; }
+}
+// outages/summary rows → [{ code, name, events, score }], worst first. `score` is IODA's unitless
+// severity; the UI only uses it to rank and scale bars.
+function parseIodaSummary(data){
+  if (!Array.isArray(data)) return null;
+  return data.map(e => ({
+    code: String((e.entity && e.entity.code) || ""), name: String((e.entity && e.entity.name) || ""),
+    events: e.event_cnt || 0, score: Math.round((e.scores && e.scores.overall) || 0)
+  })).filter(e => e.code).sort((a, b) => b.score - a.score);
+}
+// outages/events rows → one entry per incident. IODA reports the same drop once per datasource (BGP,
+// active probing, darknet), so events that start within 30 min of each other are merged.
+const IODA_SOURCE = { "bgp": "BGP", "ping-slash24": "active probing", "merit-nt": "darknet", "gtr": "Google traffic", "gtr-norm": "Google traffic" };
+function parseIodaEvents(data){
+  if (!Array.isArray(data)) return null;
+  const rows = data.map(e => ({ start: e.start * 1000, end: (e.start + (e.duration || 0)) * 1000, src: IODA_SOURCE[e.datasource] || e.datasource }))
+    .filter(e => e.start).sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const e of rows){
+    const last = merged[merged.length - 1];
+    if (last && e.start - last.start <= 1800000){ last.end = Math.max(last.end, e.end); if (!last.sources.includes(e.src)) last.sources.push(e.src); }
+    else merged.push({ start: e.start, end: e.end, sources: [e.src] });
+  }
+  return merged.reverse().map(e => ({ start: new Date(e.start).toISOString(), end: new Date(e.end).toISOString(), sources: e.sources }));
+}
+const unixNow = () => Math.floor(Date.now() / 1000);
+
+// Worldwide internet-disruption picture for the Geo Intel overview: IODA's worst-hit countries this
+// week (no key, 1 subrequest) plus Radar's verified outage annotations with their cause (token-gated,
+// 1 subrequest). A failed half comes back null; collect() falls back to the previous cycle's copy.
+async function collectOutages(env, sourceStatus){
+  const now = unixNow();
+  const [iodaData, radarRes] = await Promise.all([
+    iodaGet("outages/summary", { from: now - 7 * 86400, until: now, entityType: "country", limit: 60 }),
+    env.CF_RADAR_TOKEN ? radarGet(env.CF_RADAR_TOKEN, "annotations/outages", { dateRange: "28d", limit: 40 }) : Promise.resolve(null)
+  ]);
+  const ioda = parseIodaSummary(iodaData);
+  const radar = parseRadarOutages(radarRes);
+  sourceStatus["IODA"] = ioda ? { ok: true, count: ioda.length } : { ok: false, error: "no data" };
+  if (env.CF_RADAR_TOKEN) sourceStatus["Cloudflare Radar · outages"] = radar ? { ok: true, count: radar.length } : { ok: false, error: "no data" };
+  return { generated: new Date().toISOString(), ioda, radar };
+}
+function mergeOutages(fresh, prev){
+  const f = fresh || {}, p = prev || {};
+  const ioda = f.ioda || p.ioda || null, radar = f.radar || p.radar || null;
+  if (!ioda && !radar) return null;
+  return { generated: (f.ioda || f.radar) ? f.generated : (p.generated || null), ioda: ioda || [], radar: radar || [] };
+}
+
+// GET /api/radar?cc=XX — the DDoS view for one country: Radar's attack breakdowns targeting it (when
+// the token is set) plus IODA disruptions (always). Public endpoint, so the country code is validated
+// and each answer is cached at the edge (Cache API, no KV writes) for RADAR_CC_CACHE_S, like
+// /api/ip-check. Up to 11 subrequests, only on a cache miss.
 const RADAR_CC_CACHE_S = 6 * 3600;
 async function radarForCountry(env, cc, ctx){
   const out = (obj, status, cacheS) => new Response(JSON.stringify(obj), {
@@ -1074,16 +1191,37 @@ async function radarForCountry(env, cc, ctx){
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": cacheS ? "public, max-age=" + cacheS : "no-store" }
   });
   if (!/^[A-Z]{2}$/.test(cc)) return out({ error: "Pass a two-letter country code, e.g. ?cc=IN." }, 400);
-  if (!env.CF_RADAR_TOKEN) return out({ error: "Cloudflare Radar isn't configured (CF_RADAR_TOKEN not set)." }, 503);
-  const cacheKey = new Request("https://radar.internal/" + cc);
+  const cacheKey = new Request("https://radar.internal/v2/" + cc);
   const cached = await caches.default.match(cacheKey);
   if (cached) return cached;
-  const [l3, l7] = await Promise.all([
-    fetchRadarSummary(env.CF_RADAR_TOKEN, "layer3", RADAR_L3_DIMENSION, cc),
-    fetchRadarSummary(env.CF_RADAR_TOKEN, "layer7", RADAR_L7_DIMENSION, cc)
+  const t = env.CF_RADAR_TOKEN, now = unixNow();
+  const wk = { dateRange: "7d", location: cc };
+  const radar = (path, params, parse) => t ? radarGet(t, path, params).then(parse) : Promise.resolve(null);
+  const [l3, l7, l3Origins, l7Pairs, bitrate, duration, series, outages, iodaCountry, iodaEvents, iodaNets] = await Promise.all([
+    radar("attacks/layer3/summary/" + RADAR_L3_DIMENSION, Object.assign({ direction: "TARGET" }, wk), r => parseRadarSummary(r)),
+    // L7 `location` = source of the attack traffic (see collectDdosTelemetry()), so this is "from cc".
+    radar("attacks/layer7/summary/" + RADAR_L7_DIMENSION, wk, r => parseRadarSummary(r)),
+    radar("attacks/layer3/top/locations/origin", Object.assign({ limit: 8 }, wk), parseRadarTop),
+    radar("attacks/layer7/top/attacks", Object.assign({ limit: 8, limitDirection: "TARGET" }, wk), parseRadarTop),
+    radar("attacks/layer3/summary/bitrate", Object.assign({ direction: "TARGET" }, wk), r => parseRadarSummary(r, RADAR_BITRATE)),
+    radar("attacks/layer3/summary/duration", Object.assign({ direction: "TARGET" }, wk), r => parseRadarSummary(r, RADAR_DURATION)),
+    radar("attacks/layer3/timeseries", { dateRange: "28d", aggInterval: "1d", location: cc, direction: "TARGET" }, parseRadarSeries),
+    radar("annotations/outages", { dateRange: "28d", location: cc, limit: 20 }, parseRadarOutages),
+    iodaGet("outages/summary", { from: now - 7 * 86400, until: now, entityType: "country", entityCode: cc }).then(parseIodaSummary),
+    iodaGet("outages/events", { from: now - 28 * 86400, until: now, entityType: "country", entityCode: cc, limit: 60, format: "codf" }).then(parseIodaEvents),
+    iodaGet("outages/summary", { from: now - 7 * 86400, until: now, entityType: "asn", relatedTo: "country/" + cc, limit: 8 }).then(parseIodaSummary)
   ]);
-  if (!l3 && !l7) return out({ error: "Cloudflare Radar didn't return data for " + cc + "." }, 502);
-  const res = out({ cc, generated: new Date().toISOString(), l3: l3 || [], l7: l7 || [] }, 200, RADAR_CC_CACHE_S);
+  const radarOk = [l3, l7, l3Origins, l7Pairs, bitrate, duration, series, outages].some(Boolean);
+  const iodaOk = [iodaCountry, iodaEvents, iodaNets].some(Boolean);
+  if (!radarOk && !iodaOk) return out({ error: "Neither Cloudflare Radar nor IODA returned data for " + cc + "." }, 502);
+  const res = out({
+    cc, generated: new Date().toISOString(),
+    radar: t ? { configured: true, ok: radarOk } : { configured: false },
+    l3: l3 || [], l7From: l7 || [], l3Origins: l3Origins || [],
+    l7Origins: (l7Pairs || []).filter(p => p.to === cc).map(p => ({ cc: p.from, pct: p.pct })),
+    bitrate: bitrate || [], duration: duration || [], series: series || [], outages: outages || [],
+    ioda: { ok: iodaOk, country: (iodaCountry || [])[0] || null, events: iodaEvents || [], networks: iodaNets || [] }
+  }, 200, RADAR_CC_CACHE_S);
   ctx.waitUntil(caches.default.put(cacheKey, res.clone()));
   return res;
 }
@@ -1204,6 +1342,13 @@ async function collect(env){
     } catch (e){ /* collectDdosTelemetry tracks its own sourceStatus; keep going */ }
   })());
 
+  let outages = null;
+  tasks.push((async () => {
+    try {
+      outages = await collectOutages(env, sourceStatus);
+    } catch (e){ /* collectOutages tracks its own sourceStatus; keep going */ }
+  })());
+
   tasks.push((async () => {
     try {
       await collectMisp(sourceStatus, iocs);
@@ -1303,7 +1448,8 @@ async function collect(env){
     ransomwareNews: mergedRansomwareNews,
     iocs: mergedIocs,
     vulnerabilities: enrichedVulnerabilities,
-    ddosTelemetry: ddosTelemetry || prev.ddosTelemetry || null
+    ddosTelemetry: ddosTelemetry || prev.ddosTelemetry || null,
+    outages: mergeOutages(outages, prev.outages)
   };
   await env.THREAT_DATA.put("latest", JSON.stringify(data));
   return data;
@@ -1568,7 +1714,7 @@ function json(obj, status){
 }
 
 // Named exports are unused by the Worker runtime but make these functions easy to unit test.
-export { decode, tag, geoTag, ccRegion, withGeo, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, collectDdosTelemetry, radarForCountry, rwCountriesForNow, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
+export { decode, tag, geoTag, ccRegion, withGeo, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, radarGet, parseRadarSummary, parseRadarTop, parseRadarIndustries, parseRadarSeries, parseRadarOutages, collectDdosTelemetry, parseIodaSummary, parseIodaEvents, collectOutages, mergeOutages, radarForCountry, rwCountriesForNow, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
 
 export default {
   async fetch(request, env, ctx){
@@ -1576,7 +1722,7 @@ export default {
 
     if (url.pathname === "/api/data"){
       const raw = await env.THREAT_DATA.get("latest");
-      if (!raw) return json({ generated: null, vulnGenerated: null, infocon: "green", items: [], victims: [], kev: [], telegram: [], ransomwareNews: [], iocs: [], vulnerabilities: [], ddosTelemetry: null, note: "No data yet — the first scheduled collection hasn't run. POST /api/refresh to trigger one manually." });
+      if (!raw) return json({ generated: null, vulnGenerated: null, infocon: "green", items: [], victims: [], kev: [], telegram: [], ransomwareNews: [], iocs: [], vulnerabilities: [], ddosTelemetry: null, outages: null, note: "No data yet — the first scheduled collection hasn't run. POST /api/refresh to trigger one manually." });
       return json(JSON.parse(raw));
     }
 
