@@ -1,6 +1,6 @@
-# APJ Threat Intelligence — standalone Cloudflare Worker app
+# Threat Intelligence — standalone Cloudflare Worker app
 
-Open-source threat intel dashboard (India P1 → APJ → Global): live feed, ransomware-leak tracker, MITRE-mapped actor profiles, INFOCON-driven severity banner, and a DarkGrid-style global attack globe.
+Open-source global threat intel dashboard, filterable by region (APJ, Europe, N. America, S. America, Middle East, Africa), with a profile page for any country: live feed, ransomware-leak tracker, MITRE-mapped actor profiles, INFOCON-driven severity banner, and a DarkGrid-style world claim map.
 
 Architecture:
 

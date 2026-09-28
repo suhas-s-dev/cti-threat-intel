@@ -1,5 +1,5 @@
 /**
- * APJ Threat Intelligence — Cloudflare Worker backend.
+ * Threat Intelligence — Cloudflare Worker backend (global, filterable by region and country).
  *
  * - `scheduled()` runs on a cron trigger, fetches OSINT feeds + ransomware.live
  *   server-side (no CORS restrictions here, unlike a browser), tags items,
@@ -64,7 +64,19 @@ const RANSOMWARE_NEWS_SOURCES = [
   { name: "Mastodon ransomwatch", url: "https://infosec.exchange/@ransomwatch.rss" }
 ];
 const RW_RECENT = "https://api.ransomware.live/v2/recentvictims";
-const RW_INDIA = "https://api.ransomware.live/v2/countryvictims/IN";
+// recentvictims is only the newest ~100 claims worldwide (a few days, a third of them US), so each
+// full cycle also pulls the complete claim history for RW_COUNTRIES_PER_RUN countries, rotating
+// through RW_COUNTRY_ROTATION by wall clock (no state to keep) — every listed country is refreshed
+// about every 6.5 h. This used to be India alone, every cycle. Only countries whose full history is
+// under ~450KB are listed: the US (7MB), UK, Canada and Germany (700KB+) are too big to JSON.parse
+// inside a Worker's CPU budget, and they dominate recentvictims anyway.
+const RW_COUNTRY_URL = "https://api.ransomware.live/v2/countryvictims/";
+const RW_COUNTRY_ROTATION = ["IN","AU","JP","BR","FR","IT","MX","ES","SG","AE","SA","ZA","IL","TR","ID","MY","KR","TW","TH","NL","AR","CO","PH","NZ","CL","EG"];
+const RW_COUNTRIES_PER_RUN = 2;
+function rwCountriesForNow(now = Date.now()){
+  const slot = Math.floor(now / 1800000) * RW_COUNTRIES_PER_RUN;
+  return Array.from({ length: RW_COUNTRIES_PER_RUN }, (_, i) => RW_COUNTRY_ROTATION[(slot + i) % RW_COUNTRY_ROTATION.length]);
+}
 const KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 // EPSS (Exploit Prediction Scoring System, FIRST.org) — probability a CVE is exploited in the wild
 // in the next 30 days, independent of CVSS severity. Free, no API key, no rate-limit docs published.
@@ -133,7 +145,7 @@ const TELEGRAM_CHANNELS = [
   { name: "Ummah Sec", handle: "UmmahSecurity", actorChannel: true },
   { name: "Hackmanac", handle: "hackmanac_cybernews" }
 ];
-// Every Telegram post must clear this relevance bar (or already be india/apj/lens-tagged) to be
+// Every Telegram post must clear this relevance bar (or already be DDoS/AppSec-lens-tagged) to be
 // kept at all — these channels are unmoderated, unlike the RSS/JSON sources, so filtering out
 // off-topic noise (personal chatter, unrelated news) happens here rather than trusting the source.
 const CTI_RELEVANCE_KW = ["malware","ransomware","breach","hack","hacked","hacker","exploit","exploited","vulnerability","vulnerabilities","cve","phishing","apt","threat actor","backdoor","botnet","ddos","leak","leaked","cyberattack","cyber attack","cybercrime","cyber fraud","zero-day","zero day","rce","remote code execution","spyware","trojan","infostealer","stealer","credential","supply chain","incident response","compromise","compromised","scam","security flaw","patch","advisory","c2","command and control","osint","forensics","pentest","penetration test","dark web","data breach","data leak","threat intelligence","vulnerability management","misconfiguration","unauthorized access","privilege escalation","sql injection","cross-site scripting","injection","mitre att&ck","ioc","indicators of compromise","cybersecurity","infosec","apk","otp fraud","sim swap","identity theft"];
@@ -172,10 +184,187 @@ const MISP_IOC_CAP = 50; // matches ABUSECH_IOC_CAP
 // is the indicator. Only types confirmed to be real indicators in sample data are kept.
 const MISP_IOC_TYPES = new Set(["ip-dst", "ip-src", "domain", "hostname", "md5", "sha1", "sha256"]);
 
-const APJ_CC = { IN:"India", JP:"Japan", CN:"China", KR:"South Korea", TW:"Taiwan", AU:"Australia", NZ:"New Zealand", SG:"Singapore", VN:"Vietnam", TH:"Thailand", ID:"Indonesia", MY:"Malaysia", PH:"Philippines", BD:"Bangladesh", LK:"Sri Lanka", NP:"Nepal", PK:"Pakistan", MM:"Myanmar", KH:"Cambodia", HK:"Hong Kong", MO:"Macau" };
+// Every country the app can place on the map or tag, by region. Keep in sync with REGION_CC in
+// public/app.js. Regions are the filter set used across the UI (APJ, Europe, N. America — incl.
+// Central America and the Caribbean — S. America, Middle East, Africa); anything not listed (and
+// every victim with no country) falls into "other".
+const REGION_CC = {
+  apj: "IN JP CN KR KP TW AU NZ SG VN TH ID MY PH BD LK NP PK MM KH HK MO LA BN MN MV BT AF KZ UZ KG TJ TM PG FJ TL",
+  eu: "GB IE FR DE ES PT IT NL BE LU CH AT SE NO DK FI IS PL CZ SK HU RO BG GR HR SI RS BA ME MK AL XK EE LV LT UA BY MD RU CY MT LI MC AD SM GE AM AZ",
+  na: "US CA MX GT HN SV NI CR PA BZ CU DO HT JM TT BS BB PR",
+  sa: "BR AR CO CL PE VE EC BO PY UY GY SR",
+  me: "TR SA AE IL IR IQ JO LB SY KW QA BH OM YE EG PS",
+  af: "ZA NG KE MA DZ TN LY GH ET TZ UG SN CI CM AO ZW ZM MZ RW SD SS SO NA BW MU MG CD BF"
+};
+const CC_REGION = {};
+for (const [rg, list] of Object.entries(REGION_CC)) for (const cc of list.split(" ")) CC_REGION[cc] = rg;
+function ccRegion(cc){ return CC_REGION[String(cc || "").toUpperCase()] || "other"; }
 
-const IN_KW = ["india","indian","cert-in","aadhaar","upi","npci","rbi","sebi","bharat","mumbai","new delhi","delhi","bengaluru","bangalore","hyderabad","chennai","kolkata","pune","transparent tribe","apt36","apt-36","sidecopy","side-copy","patchwork","donot team","bitter apt","sidewinder"];
-const APJ_KW = ["balochistan","japan","japanese","china","chinese","prc","korea","korean","dprk","taiwan","taiwanese","australia","australian","new zealand","singapore","vietnam","thailand","thai","indonesia","malaysia","philippines","bangladesh","sri lanka","nepal","pakistan","pakistani","myanmar","cambodia","hong kong","apac","apj","asia-pacific","asia pacific","southeast asia","south asia","asean","jpcert","acsc","mustang panda","lazarus","kimsuky","apt41","apt-41","salt typhoon","volt typhoon","nihon"];
+// Country keyword lists for tagging free text (news, Telegram, Mastodon, APT-sheet targets). First
+// entry is the display name. Word-boundary, case-insensitive, longest match first — so "north
+// korean" tags KP rather than also tripping KR's "korean", and "latin american" doesn't count as US.
+// Ambiguous names are left out on purpose (Georgia the US state, Jordan, Chad, Niger, Mali, Guinea);
+// only their unambiguous cities/demonyms are listed. Keywords ending in punctuation lose it ("u.s"
+// not "u.s.") because \b can't follow a "." before a space. A mention is a mention: "Chinese
+// hackers" tags CN the same way it used to tag APJ — it means "relevant to", not "victim in".
+// India keeps its extra non-name keywords (CERT-In, Aadhaar, UPI, India-targeting groups) from the
+// old India-first lists. Add a country here and to REGION_CC to make it taggable.
+const GEO_KW = {
+  IN: ["India","indian","cert-in","aadhaar","upi","npci","rbi","sebi","bharat","mumbai","new delhi","delhi","bengaluru","bangalore","hyderabad","chennai","kolkata","pune","transparent tribe","apt36","apt-36","sidecopy","side-copy","patchwork","donot team","bitter apt","sidewinder"],
+  JP: ["Japan","japanese","tokyo","osaka","jpcert","nihon"],
+  CN: ["China","chinese","beijing","shanghai","shenzhen","prc"],
+  KR: ["South Korea","south korean","korean","seoul","republic of korea"],
+  KP: ["North Korea","north korean","dprk","pyongyang","lazarus","kimsuky"],
+  TW: ["Taiwan","taiwanese","taipei"],
+  AU: ["Australia","australian","sydney","melbourne","canberra","acsc"],
+  NZ: ["New Zealand","auckland"],
+  SG: ["Singapore","singaporean"],
+  VN: ["Vietnam","vietnamese","viet nam","hanoi"],
+  TH: ["Thailand","thai","bangkok"],
+  ID: ["Indonesia","indonesian","jakarta"],
+  MY: ["Malaysia","malaysian","kuala lumpur"],
+  PH: ["Philippines","philippine","filipino","manila"],
+  BD: ["Bangladesh","bangladeshi","dhaka"],
+  LK: ["Sri Lanka","sri lankan"],
+  NP: ["Nepal","nepalese","nepali","kathmandu"],
+  PK: ["Pakistan","pakistani","islamabad","karachi","balochistan"],
+  MM: ["Myanmar","burma","burmese"],
+  KH: ["Cambodia","cambodian","phnom penh"],
+  HK: ["Hong Kong"],
+  MO: ["Macau","macao"],
+  LA: ["Laos","lao pdr"],
+  BN: ["Brunei"],
+  MN: ["Mongolia","mongolian"],
+  MV: ["Maldives"],
+  BT: ["Bhutan"],
+  AF: ["Afghanistan","afghan","kabul"],
+  KZ: ["Kazakhstan","kazakh"],
+  UZ: ["Uzbekistan","uzbek"],
+  KG: ["Kyrgyzstan"],
+  TJ: ["Tajikistan"],
+  TM: ["Turkmenistan"],
+  PG: ["Papua New Guinea"],
+  FJ: ["Fiji"],
+  TL: ["Timor-Leste","east timor"],
+  GB: ["United Kingdom","british","britain","england","scotland","wales","london","u.k","ncsc uk"],
+  IE: ["Ireland","irish","dublin"],
+  FR: ["France","french","paris","anssi","cert-fr"],
+  DE: ["Germany","german","berlin"],
+  ES: ["Spain","spanish","madrid"],
+  PT: ["Portugal","portuguese","lisbon"],
+  IT: ["Italy","italian","rome","milan"],
+  NL: ["Netherlands","dutch","amsterdam","the hague"],
+  BE: ["Belgium","belgian","brussels"],
+  LU: ["Luxembourg"],
+  CH: ["Switzerland","swiss","zurich","geneva"],
+  AT: ["Austria","austrian","vienna"],
+  SE: ["Sweden","swedish","stockholm"],
+  NO: ["Norway","norwegian","oslo"],
+  DK: ["Denmark","danish","copenhagen"],
+  FI: ["Finland","finnish","helsinki"],
+  IS: ["Iceland","icelandic"],
+  PL: ["Poland","polish","warsaw"],
+  CZ: ["Czechia","czech republic","czech","prague"],
+  SK: ["Slovakia","slovak"],
+  HU: ["Hungary","hungarian","budapest"],
+  RO: ["Romania","romanian","bucharest"],
+  BG: ["Bulgaria","bulgarian"],
+  GR: ["Greece","greek","athens"],
+  HR: ["Croatia","croatian"],
+  SI: ["Slovenia","slovenian"],
+  RS: ["Serbia","serbian","belgrade"],
+  BA: ["Bosnia and Herzegovina","bosnia"],
+  ME: ["Montenegro"],
+  MK: ["North Macedonia","macedonia"],
+  AL: ["Albania","albanian"],
+  XK: ["Kosovo"],
+  EE: ["Estonia","estonian"],
+  LV: ["Latvia","latvian"],
+  LT: ["Lithuania","lithuanian"],
+  UA: ["Ukraine","ukrainian","kyiv","kiev","cert-ua"],
+  BY: ["Belarus","belarusian"],
+  MD: ["Moldova","moldovan"],
+  RU: ["Russia","russian","moscow","kremlin"],
+  CY: ["Cyprus"],
+  MT: ["Malta","maltese"],
+  GE: ["Georgia","tbilisi"],
+  AM: ["Armenia","armenian"],
+  AZ: ["Azerbaijan","azerbaijani","baku"],
+  US: ["United States","u.s","usa","american","americans"],
+  CA: ["Canada","canadian","ottawa","toronto"],
+  MX: ["Mexico","mexican"],
+  GT: ["Guatemala"], HN: ["Honduras"], SV: ["El Salvador"], NI: ["Nicaragua"], CR: ["Costa Rica"],
+  PA: ["Panama","panamanian"], BZ: ["Belize"], CU: ["Cuba","cuban"], DO: ["Dominican Republic"],
+  HT: ["Haiti"], JM: ["Jamaica"], TT: ["Trinidad and Tobago","trinidad"], BS: ["Bahamas"], BB: ["Barbados"], PR: ["Puerto Rico"],
+  BR: ["Brazil","brazilian","são paulo","sao paulo"],
+  AR: ["Argentina","argentine","argentinian","buenos aires"],
+  CO: ["Colombia","colombian","bogota","bogotá"],
+  CL: ["Chile","chilean"],
+  PE: ["Peru","peruvian"],
+  VE: ["Venezuela","venezuelan"],
+  EC: ["Ecuador","ecuadorian"],
+  BO: ["Bolivia"], PY: ["Paraguay"], UY: ["Uruguay"], GY: ["Guyana"], SR: ["Suriname"],
+  TR: ["Türkiye","turkey","turkiye","turkish","istanbul","ankara"],
+  SA: ["Saudi Arabia","saudi","riyadh"],
+  AE: ["United Arab Emirates","emirati","uae","dubai","abu dhabi"],
+  IL: ["Israel","israeli","tel aviv"],
+  IR: ["Iran","iranian","tehran"],
+  IQ: ["Iraq","iraqi"],
+  JO: ["Jordan","jordanian","amman"],
+  LB: ["Lebanon","lebanese"],
+  SY: ["Syria","syrian"],
+  KW: ["Kuwait"], QA: ["Qatar","qatari","doha"], BH: ["Bahrain"], OM: ["Oman","omani"],
+  YE: ["Yemen","yemeni","houthi"],
+  EG: ["Egypt","egyptian","cairo"],
+  PS: ["Palestine","palestinian","gaza","west bank"],
+  ZA: ["South Africa","south african","johannesburg"],
+  NG: ["Nigeria","nigerian","lagos"],
+  KE: ["Kenya","kenyan","nairobi"],
+  MA: ["Morocco","moroccan"],
+  DZ: ["Algeria","algerian"],
+  TN: ["Tunisia","tunisian"],
+  LY: ["Libya","libyan"],
+  GH: ["Ghana","ghanaian"],
+  ET: ["Ethiopia","ethiopian"],
+  TZ: ["Tanzania"], UG: ["Uganda"], SN: ["Senegal"], CI: ["Côte d'Ivoire","ivory coast","cote d'ivoire"],
+  CM: ["Cameroon"], AO: ["Angola"], ZW: ["Zimbabwe"], ZM: ["Zambia"], MZ: ["Mozambique"], RW: ["Rwanda"],
+  SD: ["Sudan","sudanese"], SS: ["South Sudan"], SO: ["Somalia"], NA: ["Namibia"], BW: ["Botswana"],
+  MU: ["Mauritius"], MG: ["Madagascar"], CD: ["DR Congo","democratic republic of the congo","drc"], BF: ["Burkina Faso"]
+};
+// The display name is also a keyword — except where the name itself is the ambiguous word
+// (Georgia, Jordan): those match only on their unambiguous entries.
+const GEO_NAME_ONLY = new Set(["GE", "JO"]);
+// Region-level vocabulary that names no single country.
+const REGION_KW = {
+  apj: ["apac","apj","asia-pacific","asia pacific","southeast asia","south asia","east asia","asean","indo-pacific","mustang panda","apt41","apt-41","salt typhoon","volt typhoon"],
+  eu: ["europe","european","european union","enisa","europol","nordic","baltic","balkans"],
+  na: ["north america","north american","central america","central american","caribbean"],
+  sa: ["south america","south american","latin america","latin american","latam"],
+  me: ["middle east","middle eastern","gulf states","gcc","mena"],
+  af: ["africa","african","sub-saharan"]
+};
+// Acronyms that are only country names in capitals ("US" vs "us") — matched case-sensitively.
+const GEO_CASED = { US: "US", USA: "US", UK: "GB", EU: "eu" };
+// Feeds that are about one country by definition, whatever the headline says.
+const SOURCE_CC = { "JPCERT/CC": "JP", "ACSC": "AU", "CERT-FR": "FR", "NCSC UK": "GB", "CISA Advisories": "US" };
+const COUNTRY_NAME = Object.fromEntries(Object.entries(GEO_KW).map(([cc, kw]) => [cc, kw[0]]));
+const GEO_KW_MAP = new Map();
+for (const [cc, kw] of Object.entries(GEO_KW)) kw.slice(GEO_NAME_ONLY.has(cc) ? 1 : 0).forEach(k => GEO_KW_MAP.set(k.toLowerCase(), cc));
+for (const [rg, kw] of Object.entries(REGION_KW)) kw.forEach(k => GEO_KW_MAP.set(k, rg));
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const RE_GEO = new RegExp("\\b(" + [...GEO_KW_MAP.keys()].sort((a, b) => b.length - a.length).map(reEsc).join("|") + ")\\b", "g");
+const RE_GEO_CASED = new RegExp("\\b(" + Object.keys(GEO_CASED).join("|") + ")\\b(?![$€£])", "g");
+// → { cc: ["IN","PK"], rg: ["apj"] }. Region keys are lowercase, country codes uppercase.
+function geoTag(hay, srcName){
+  const cc = new Set(), rg = new Set();
+  const add = t => { if (!t) return; if (t === t.toUpperCase()){ cc.add(t); if (CC_REGION[t]) rg.add(CC_REGION[t]); } else rg.add(t); };
+  add(SOURCE_CC[srcName]);
+  const text = String(hay || "");
+  for (const m of text.toLowerCase().matchAll(RE_GEO)) add(GEO_KW_MAP.get(m[1]));
+  for (const m of text.matchAll(RE_GEO_CASED)) add(GEO_CASED[m[1]]);
+  return { cc: [...cc].slice(0, 8), rg: [...rg] };
+}
+
 const LENS_KW = ["ddos","denial of service","denial-of-service","botnet","mirai","waf","web application firewall","api","apis","bot","bots","layer 7","layer 3","layer 4","l7","l3","l4","application-layer","credential stuffing","account takeover","web shell","webshell","scraping","scraper","volumetric","amplification","reflection attack","http flood","rate limiting","sql injection","injection","xss","cross-site scripting","rce","remote code execution","cdn"];
 // CVE weakness classes an edge WAF/virtual-patch rule can typically mitigate (request-shape blocking),
 // as opposed to e.g. a memory-corruption or local-privilege-escalation bug a WAF has no visibility into.
@@ -186,7 +375,7 @@ const WAF_CWE = new Set(["CWE-89","CWE-79","CWE-78","CWE-77","CWE-94","CWE-95","
 const WAF_KW = ["sql injection","cross-site scripting","xss","remote code execution","command injection","os command injection","code injection","path traversal","directory traversal","server-side request forgery","ssrf","xml external entity","xxe","deserialization","insecure deserialization","arbitrary file upload","unrestricted file upload","open redirect","request smuggling","response splitting","server-side template injection","ssti","local file inclusion","remote file inclusion","lfi","rfi"];
 
 function kwRegex(list){ return new RegExp("\\b(" + list.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")\\b", "i"); }
-const RE_IN = kwRegex(IN_KW), RE_APJ = kwRegex(APJ_KW), RE_LENS = kwRegex(LENS_KW), RE_CLAIM = kwRegex(CLAIM_KW), RE_RELEVANT = kwRegex(CTI_RELEVANCE_KW), RE_DOX = kwRegex(DOX_KW), RE_WAF = kwRegex(WAF_KW);
+const RE_LENS = kwRegex(LENS_KW), RE_CLAIM = kwRegex(CLAIM_KW), RE_RELEVANT = kwRegex(CTI_RELEVANCE_KW), RE_DOX = kwRegex(DOX_KW), RE_WAF = kwRegex(WAF_KW);
 
 function isWafApplicable(cwes, text){
   if ((cwes || []).some(c => WAF_CWE.has(String(c).toUpperCase()))) return true;
@@ -210,13 +399,18 @@ function tag(xml, name){
   return m ? m[1].trim() : "";
 }
 
+// Country codes, regions, and the DDoS/AppSec lens for one item's text. See geoTag() above.
 function tagFlags(hay, srcName){
-  const h = hay.toLowerCase();
-  return {
-    india: RE_IN.test(h),
-    apj: RE_APJ.test(h) || RE_IN.test(h) || srcName === "JPCERT/CC",
-    lens: RE_LENS.test(h)
-  };
+  return Object.assign(geoTag(hay, srcName), { lens: RE_LENS.test(hay.toLowerCase()) });
+}
+// Items stored before country tagging existed only carry the old india/apj flags — tag them from
+// their text on the next merge so the whole rolling window is filterable by region and country.
+function withGeo(i){
+  if (Array.isArray(i.cc)) return i;
+  const t = tagFlags((i.title || "") + " " + (i.desc || ""), i.channel ? "" : i.src);
+  const out = Object.assign({}, i, { cc: t.cc, rg: t.rg });
+  delete out.india; delete out.apj;
+  return out;
 }
 
 function parseItems(xml, srcName){
@@ -309,7 +503,7 @@ function parseOpenPhish(text, cycleIso){
     src: "OpenPhish", title: "OpenPhish community feed: " + urls.length + " active phishing URLs tracked",
     link: OPENPHISH_URL + "#" + day,
     desc: hosts.length ? "Sample impersonated/hosting domains: " + hosts.join(", ") : "",
-    date: cycleIso, india: false, apj: false, lens: false
+    date: cycleIso, cc: [], rg: [], lens: false
   }];
 }
 
@@ -353,11 +547,13 @@ function parseTelegramChannel(html, channelName, opts){
     // regardless of type. Seen in practice on actor-operational channels doxxing rival hackers.
     if (RE_DOX.test(hayLower)) continue;
     const tags = tagFlags(hay, channelName);
-    // Unmoderated news/research channels post plenty of off-topic chatter — require relevance.
+    // Unmoderated news/research channels post plenty of off-topic chatter — require relevance. A
+    // country mention alone doesn't count (it used to, for India/APJ, when those were the priority);
+    // with every country taggable that would wave through any off-topic post naming a place.
     // Actor-operational channels are exempt: everything posted there is inherently an attack/leak
     // claim (often just a target name + emoji, with none of the usual CTI vocabulary) and is
     // always tagged as a claim below rather than relying on CLAIM_KW phrase matching.
-    if (!actorChannel && !(tags.india || tags.apj || tags.lens || RE_RELEVANT.test(hayLower))) continue;
+    if (!actorChannel && !(tags.lens || RE_RELEVANT.test(hayLower))) continue;
 
     out.push(Object.assign({
       src: "Telegram · " + channelName, telegram: true, channel: channelName,
@@ -377,8 +573,7 @@ function parseRwJson(data, forceCc){
       victim: v.victim || v.post_title || "unknown",
       group: v.group || v.group_name || "unknown",
       cc,
-      country: APJ_CC[cc] || cc || "—",
-      apj: !!APJ_CC[cc],
+      country: COUNTRY_NAME[cc] || cc || "—",
       sector: (v.activity && v.activity !== "Not Found") ? v.activity : "",
       date: v.discovered || v.attackdate || null
     };
@@ -481,7 +676,7 @@ async function collectAbuseCh(env, cycleIso, sourceStatus, iocsOut){
     const urls = (j.urls || []);
     if (urls.length){
       const tags = [...new Set(urls.flatMap(u => u.tags || []))].slice(0, 6);
-      out.push({ src: "abuse.ch URLhaus", title: "URLhaus: " + urls.length + " recent malware-hosting URLs", link: "https://urlhaus.abuse.ch/browse/#" + day, desc: tags.length ? "Top tags: " + tags.join(", ") : "", date: cycleIso, india: false, apj: false, lens: false });
+      out.push({ src: "abuse.ch URLhaus", title: "URLhaus: " + urls.length + " recent malware-hosting URLs", link: "https://urlhaus.abuse.ch/browse/#" + day, desc: tags.length ? "Top tags: " + tags.join(", ") : "", date: cycleIso, cc: [], rg: [], lens: false });
       iocsOut.push(...parseUrlhausIocs(urls));
     }
     sourceStatus["abuse.ch URLhaus"] = { ok: true, count: urls.length };
@@ -492,7 +687,7 @@ async function collectAbuseCh(env, cycleIso, sourceStatus, iocsOut){
     const iocs = Array.isArray(j.data) ? j.data : [];
     if (iocs.length){
       const families = [...new Set(iocs.map(i => i.malware_printable || i.malware).filter(Boolean))].slice(0, 6);
-      out.push({ src: "abuse.ch ThreatFox", title: "ThreatFox: " + iocs.length + " new IOCs in the last 24h", link: "https://threatfox.abuse.ch/browse/#" + day, desc: families.length ? "Malware families: " + families.join(", ") : "", date: cycleIso, india: false, apj: false, lens: false });
+      out.push({ src: "abuse.ch ThreatFox", title: "ThreatFox: " + iocs.length + " new IOCs in the last 24h", link: "https://threatfox.abuse.ch/browse/#" + day, desc: families.length ? "Malware families: " + families.join(", ") : "", date: cycleIso, cc: [], rg: [], lens: false });
       iocsOut.push(...parseThreatfoxIocs(iocs));
     }
     sourceStatus["abuse.ch ThreatFox"] = { ok: true, count: iocs.length };
@@ -508,7 +703,7 @@ async function collectAbuseCh(env, cycleIso, sourceStatus, iocsOut){
     const samples = Array.isArray(j.data) ? j.data : [];
     if (samples.length){
       const sigs = [...new Set(samples.map(s => s.signature).filter(Boolean))].slice(0, 6);
-      out.push({ src: "abuse.ch MalwareBazaar", title: "MalwareBazaar: " + samples.length + " new malware samples", link: "https://bazaar.abuse.ch/browse/#" + day, desc: sigs.length ? "Signatures: " + sigs.join(", ") : "", date: cycleIso, india: false, apj: false, lens: false });
+      out.push({ src: "abuse.ch MalwareBazaar", title: "MalwareBazaar: " + samples.length + " new malware samples", link: "https://bazaar.abuse.ch/browse/#" + day, desc: sigs.length ? "Signatures: " + sigs.join(", ") : "", date: cycleIso, cc: [], rg: [], lens: false });
       iocsOut.push(...parseMalwareBazaarIocs(samples));
     }
     sourceStatus["abuse.ch MalwareBazaar"] = { ok: true, count: samples.length };
@@ -616,20 +811,34 @@ function dedupeItems(items){
     if (!key || seen.has(key)) continue;
     seen.add(key);
     const i = (i0.date && new Date(i0.date).getTime() > futureCap) ? Object.assign({}, i0, { date: null }) : i0;
-    out.push(i);
+    out.push(withGeo(i));
   }
   out.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   return out;
 }
+// Per-region retention caps for ransomware victims, applied by capVictims() after dedupe + the
+// 365-day cutoff. One shared cap on a date sort lets the busiest region (the US is ~a third of all
+// leak-site claims) push every smaller region's history out within weeks, so each region keeps its
+// own newest N. "other" is mostly claims ransomware.live couldn't place in a country. public/app.js's
+// VICTIM_CAPS mirrors this (for the "vs previous period" KPI) — keep them in sync.
+const VICTIM_CAPS = { na: 500, eu: 500, apj: 400, sa: 150, me: 150, af: 100, other: 200 };
+// Input is dedupeVictims() output (newest first), so each region keeps its newest.
+function capVictims(victims, caps = VICTIM_CAPS){
+  const n = {};
+  return victims.filter(v => { const b = ccRegion(v.cc); n[b] = (n[b] || 0) + 1; return n[b] <= caps[b]; });
+}
 function dedupeVictims(victims){
   const seen = new Set(), out = [];
-  for (const v of victims){
-    const key = (v.victim + "|" + v.group).toLowerCase();
+  for (const v0 of victims){
+    const key = (v0.victim + "|" + v0.group).toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
+    // Older stored claims carry an apj flag from the India-first schema; region now comes from cc.
+    const v = "apj" in v0 ? Object.assign({}, v0) : v0;
+    if (v !== v0){ delete v.apj; if (COUNTRY_NAME[v.cc]) v.country = COUNTRY_NAME[v.cc]; }
     out.push(v);
   }
-  out.sort((a, b) => (b.cc === "IN") - (a.cc === "IN") || (b.apj - a.apj) || String(b.date || "").localeCompare(String(a.date || "")));
+  out.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
   return out;
 }
 function dedupeKev(list){
@@ -652,7 +861,7 @@ function dedupeTelegram(list){
     const key = (i.channel + "|" + i.title).toLowerCase().trim();
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push(i);
+    out.push(withGeo(i));
   }
   out.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   return out;
@@ -689,15 +898,13 @@ function dedupeVulnerabilities(list){
         link: v.link || ("https://nvd.nist.gov/vuln/detail/" + key),
         date: v.date || null, cvssScore: (typeof v.cvssScore === "number") ? v.cvssScore : null,
         waf: !!v.waf, kev: !!v.kev, vendor: v.vendor || "", product: v.product || "", dueDate: v.dueDate || null,
-        india: !!v.india, apj: !!v.apj, lens: !!v.lens
+        lens: !!v.lens
       });
       continue;
     }
     if (typeof v.cvssScore === "number" && (prev.cvssScore === null || v.cvssScore > prev.cvssScore)) prev.cvssScore = v.cvssScore;
     prev.waf = prev.waf || !!v.waf;
     prev.kev = prev.kev || !!v.kev;
-    prev.india = prev.india || !!v.india;
-    prev.apj = prev.apj || !!v.apj;
     prev.lens = prev.lens || !!v.lens;
     if (!prev.desc && v.desc) prev.desc = v.desc;
     if (!prev.vendor && v.vendor) prev.vendor = v.vendor;
@@ -764,7 +971,7 @@ function mergeVulnData(nvdItems, ghsaItems, kev, prev, extraItems = []){
     cveId: k.cveId, title: k.name || k.cveId, desc: k.desc,
     link: "https://nvd.nist.gov/vuln/detail/" + k.cveId, date: k.dateAdded,
     cvssScore: null, waf: k.waf, kev: true, vendor: k.vendor, product: k.product, dueDate: k.dueDate,
-    india: false, apj: false, lens: false
+    cc: [], rg: [], lens: false
   }));
   const mergedVulnerabilities = dedupeVulnerabilities([
     ...mergedItems.filter(i => (i.src === "NVD" || i.src === "GitHub Advisories") && i.cveId),
@@ -809,12 +1016,12 @@ async function enrichEpss(vulnerabilities, sourceStatus){
   });
 }
 
-// Fetches one Radar summary-by-dimension breakdown (e.g. L3 attack vectors targeting India this
-// week) and returns it as a plain { label: percentage } object, sorted descending, top 8 — the
+// Fetches one Radar summary-by-dimension breakdown (e.g. L3 attack vectors targeting a country this
+// week, or worldwide when location is null) and returns it as a plain { label: percentage } object, sorted descending, top 8 — the
 // dimension cardinality here is small (a handful of vector/HTTP-method values) so no pagination is
 // needed. `result.summary_0` is Radar's map of dimension-value -> percentage string; parsed to numbers
 // here so the frontend doesn't need to. Returns null (not throw) on any failure so one bad call
-// doesn't take down the other three in collectDdosTelemetry()'s Promise.all.
+// doesn't take down its sibling in collectDdosTelemetry()'s / radarForCountry()'s Promise.all.
 async function fetchRadarSummary(token, layer, dimension, location){
   const params = new URLSearchParams({ dateRange: "7d", direction: "TARGET", format: "json" });
   if (location) params.set("location", location);
@@ -838,23 +1045,47 @@ async function fetchRadarSummary(token, layer, dimension, location){
 // constants above for the claimed-vs-confirmed caveat. Gated behind env.CF_RADAR_TOKEN; returns null
 // (not an empty object) when unset or when every call fails, so collect() can fall back to whatever
 // was in the previous cycle's KV rather than blanking out a working panel over a transient API hiccup.
+// Worldwide only: per-country breakdowns are fetched on demand by GET /api/radar?cc= (radarForCountry())
+// for the Country page, rather than picking one country to collect on every cycle.
 async function collectDdosTelemetry(env, sourceStatus){
   if (!env.CF_RADAR_TOKEN) return null;
   const token = env.CF_RADAR_TOKEN;
-  const [l3India, l3Global, l7India, l7Global] = await Promise.all([
-    fetchRadarSummary(token, "layer3", RADAR_L3_DIMENSION, "IN"),
+  const [l3Global, l7Global] = await Promise.all([
     fetchRadarSummary(token, "layer3", RADAR_L3_DIMENSION, null),
-    fetchRadarSummary(token, "layer7", RADAR_L7_DIMENSION, "IN"),
     fetchRadarSummary(token, "layer7", RADAR_L7_DIMENSION, null)
   ]);
-  const ok = [l3India, l3Global, l7India, l7Global].filter(Boolean).length;
-  sourceStatus["Cloudflare Radar"] = { ok: ok > 0, count: ok + "/4 breakdowns" };
+  const ok = [l3Global, l7Global].filter(Boolean).length;
+  sourceStatus["Cloudflare Radar"] = { ok: ok > 0, count: ok + "/2 breakdowns" };
   if (!ok) return null;
   return {
     generated: new Date().toISOString(),
-    l3: { india: l3India || [], global: l3Global || [] },
-    l7: { india: l7India || [], global: l7Global || [] }
+    l3: { global: l3Global || [] },
+    l7: { global: l7Global || [] }
   };
+}
+
+// GET /api/radar?cc=XX — the same two breakdowns for attack traffic targeting one country. Public
+// endpoint on our Radar token, so the country code is validated and each answer is cached at the
+// edge (Cache API, no KV writes) for RADAR_CC_CACHE_S, like /api/ip-check.
+const RADAR_CC_CACHE_S = 6 * 3600;
+async function radarForCountry(env, cc, ctx){
+  const out = (obj, status, cacheS) => new Response(JSON.stringify(obj), {
+    status: status || 200,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": cacheS ? "public, max-age=" + cacheS : "no-store" }
+  });
+  if (!/^[A-Z]{2}$/.test(cc)) return out({ error: "Pass a two-letter country code, e.g. ?cc=IN." }, 400);
+  if (!env.CF_RADAR_TOKEN) return out({ error: "Cloudflare Radar isn't configured (CF_RADAR_TOKEN not set)." }, 503);
+  const cacheKey = new Request("https://radar.internal/" + cc);
+  const cached = await caches.default.match(cacheKey);
+  if (cached) return cached;
+  const [l3, l7] = await Promise.all([
+    fetchRadarSummary(env.CF_RADAR_TOKEN, "layer3", RADAR_L3_DIMENSION, cc),
+    fetchRadarSummary(env.CF_RADAR_TOKEN, "layer7", RADAR_L7_DIMENSION, cc)
+  ]);
+  if (!l3 && !l7) return out({ error: "Cloudflare Radar didn't return data for " + cc + "." }, 502);
+  const res = out({ cc, generated: new Date().toISOString(), l3: l3 || [], l7: l7 || [] }, 200, RADAR_CC_CACHE_S);
+  ctx.waitUntil(caches.default.put(cacheKey, res.clone()));
+  return res;
 }
 
 // Fetches one slice of the RSS `SOURCES`. Cloudflare's free plan caps a single Worker invocation at
@@ -1006,12 +1237,21 @@ async function collect(env){
     })());
   }
 
-  tasks.push((async () => {
-    try { victims.push(...parseRwJson(await fetchJson(RW_RECENT))); } catch (e){ /* keep going */ }
-  })());
-  tasks.push((async () => {
-    try { victims.push(...parseRwJson(await fetchJson(RW_INDIA), "IN")); } catch (e){ /* keep going */ }
-  })());
+  // Recorded in sourceStatus like every other source — these used to fail silently, and the frontend's
+  // stored-claim count kept reporting ransomware.live as healthy regardless.
+  const rwFetches = [["ransomware.live · recent", RW_RECENT, undefined],
+    ...rwCountriesForNow().map(cc => ["ransomware.live · " + cc, RW_COUNTRY_URL + cc, cc])];
+  for (const [name, url, cc] of rwFetches){
+    tasks.push((async () => {
+      try {
+        const parsed = parseRwJson(await fetchJson(url), cc);
+        victims.push(...parsed);
+        sourceStatus[name] = { ok: true, count: parsed.length };
+      } catch (e){
+        sourceStatus[name] = { ok: false, error: String(e.message || e) };
+      }
+    })());
+  }
 
   await Promise.all(tasks);
 
@@ -1020,7 +1260,7 @@ async function collect(env){
 
   const cutoff = Date.now() - 365 * 86400000;
   const mergedItems = dedupeItems([...items, ...prev.items]).filter(i => !i.date || new Date(i.date).getTime() >= cutoff).slice(0, ITEMS_CAP);
-  const mergedVictims = dedupeVictims([...victims, ...prev.victims]).filter(v => !v.date || new Date(v.date).getTime() >= cutoff).slice(0, 400);
+  const mergedVictims = capVictims(dedupeVictims([...victims, ...prev.victims]).filter(v => !v.date || new Date(v.date).getTime() >= cutoff));
   const mergedKev = dedupeKev([...kev, ...(prev.kev || [])]).filter(k => !k.dateAdded || new Date(k.dateAdded).getTime() >= cutoff).slice(0, 100);
   const mergedIocs = dedupeIocs([...iocs, ...(prev.iocs || [])]).filter(i => !i.firstSeen || new Date(i.firstSeen).getTime() >= cutoff).slice(0, 500);
   // Drop archived posts from channels that have since been removed from TELEGRAM_CHANNELS (e.g.
@@ -1037,7 +1277,7 @@ async function collect(env){
     cveId: k.cveId, title: k.name || k.cveId, desc: k.desc,
     link: "https://nvd.nist.gov/vuln/detail/" + k.cveId, date: k.dateAdded,
     cvssScore: null, waf: k.waf, kev: true, vendor: k.vendor, product: k.product, dueDate: k.dueDate,
-    india: false, apj: false, lens: false
+    cc: [], rg: [], lens: false
   }));
   const mergedVulnerabilities = dedupeVulnerabilities([
     ...mergedItems.filter(i => (i.src === "NVD" || i.src === "GitHub Advisories") && i.cveId),
@@ -1045,10 +1285,17 @@ async function collect(env){
   ]).slice(0, 400);
   const enrichedVulnerabilities = await enrichEpss(mergedVulnerabilities, sourceStatus);
 
+  // RSS feeds are fetched by the 10-min job, not here — carry their last status (and that job's
+  // timestamp) forward so each full cycle doesn't blank them. Without this the source-health badge
+  // flipped between ~19 and ~32 sources and the "CVE + RSS rotation" freshness line vanished for up to
+  // 10 min after every collect(). Only feeds still in SOURCES carry over, so a removed feed drops out.
+  const rssNames = new Set(SOURCES.map(src => src.name));
+  const carriedRss = Object.fromEntries(Object.entries(prev.sourceStatus || {}).filter(([name]) => rssNames.has(name)));
   const data = {
     generated: nowIso,
+    vulnGenerated: prev.vulnGenerated || null,
     infocon: infocon || prev.infocon || "green",
-    sourceStatus,
+    sourceStatus: Object.assign(carriedRss, sourceStatus),
     items: mergedItems,
     victims: mergedVictims,
     kev: mergedKev,
@@ -1082,6 +1329,12 @@ const APT_SHEET_TABS = [
 ];
 const APT_MS_TAXONOMY_GID = "856560690"; // Microsoft 2023 weather-name renaming table
 const APT_KEY = "apt_groups", APT_META_KEY = "apt_groups_meta";
+// Bumped when parseAptTab()'s output shape changes, so the next run re-parses an unchanged sheet
+// instead of serving the old shape until someone edits it (v2: cc/rg target countries replaced the
+// india/apj flags).
+const APT_SCHEMA = 2;
+// The country a tab's groups are attributed to — see the target-country note in parseAptTab().
+const APT_TAB_CC = { "China": "CN", "Russia": "RU", "North Korea": "KP", "Iran": "IR", "Israel": "IL" };
 const APT_CHANGES_CAP = 200, APT_LINKS_CAP = 12, APT_TEXT_CAP = 600;
 const aptCsvUrl = gid => "https://docs.google.com/spreadsheets/d/" + APT_SHEET_ID + "/export?format=csv&gid=" + gid;
 
@@ -1149,13 +1402,14 @@ function parseAptTab(csvText, tab){
       else if (c.kind === "mitre") g.mitre = (v.match(/G\d{4}/) || [""])[0];
       else g[c.kind] = clip(v);
     });
-    // Flags come from who/where it targets (and origin, for the Others/Middle East tabs) — not
-    // from the tab or group name, or every China-tab group would be tagged APJ by its own label.
-    // India also checks comment/modus text (e.g. SideCopy's Targets cell never says "India", its
-    // comment does) — IN_KW is specific enough for that. APJ stays on targets/origin only, since
-    // APJ_KW includes "china"/"chinese" and nearly every China-tab comment says "Chinese".
-    const india = RE_IN.test((g.targets + " " + g.origin + " " + g.comment + " " + g.modus).toLowerCase());
-    g.india = india; g.apj = india || tagFlags(g.targets + " " + g.origin, tab).apj;
+    // Target countries come from who/where it targets — not from the tab or group name, or every
+    // China-tab group would be tagged CN by its own label. Modus operandi and comment prose count too
+    // (SideCopy's and SideWinder's Targets cells never name India; their comments do), minus the tab's
+    // own country, since that prose routinely says "Chinese"/"Russian" about the group itself.
+    const tgt = geoTag(g.targets), prose = geoTag(g.modus + " " + g.comment);
+    const cc = new Set([...tgt.cc, ...prose.cc.filter(c => c !== APT_TAB_CC[tab])]);
+    g.cc = [...cc];
+    g.rg = [...new Set([...tgt.rg, ...g.cc.map(c => CC_REGION[c]).filter(Boolean)])];
     // "?"-named rows: show the first alias/operation instead (the raw name is kept for the id).
     if (/^\?+$/.test(name)) g.label = (g.aliases[0] && g.aliases[0].n) || g.ops[0] || "Unnamed group";
     // Drop empty fields — roughly a third of the stored/served payload was "" and [].
@@ -1231,7 +1485,7 @@ async function collectAptSheet(env, opts){
   }
   const hashes = {};
   (await Promise.all(texts.map(sha1Hex))).forEach((h, i) => { hashes[gids[i]] = h; });
-  const changed = gids.some(g => meta.hashes[g] !== hashes[g]);
+  const changed = gids.some(g => meta.hashes[g] !== hashes[g]) || meta.schema !== APT_SCHEMA;
   if (!changed && !force){
     const m = Object.assign({}, meta, { checkedAt: nowIso, status: { ok: true, changed: false } });
     await env.THREAT_DATA.put(APT_META_KEY, JSON.stringify(m));
@@ -1264,7 +1518,7 @@ async function collectAptSheet(env, opts){
     changes: [...newChanges, ...((prev && prev.changes) || [])].slice(0, APT_CHANGES_CAP)
   };
   await env.THREAT_DATA.put(APT_KEY, JSON.stringify(data));
-  const m = { hashes, checkedAt: nowIso, changedAt: nowIso, status: { ok: true, changed: true, groups: groups.length, perTab, msApplied, newChanges: newChanges.length } };
+  const m = { hashes, schema: APT_SCHEMA, checkedAt: nowIso, changedAt: nowIso, status: { ok: true, changed: true, groups: groups.length, perTab, msApplied, newChanges: newChanges.length } };
   await env.THREAT_DATA.put(APT_META_KEY, JSON.stringify(m));
   return m;
 }
@@ -1314,7 +1568,7 @@ function json(obj, status){
 }
 
 // Named exports are unused by the Worker runtime but make these functions easy to unit test.
-export { decode, tag, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, collectDdosTelemetry, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
+export { decode, tag, geoTag, ccRegion, withGeo, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, collectDdosTelemetry, radarForCountry, rwCountriesForNow, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
 
 export default {
   async fetch(request, env, ctx){
@@ -1350,6 +1604,10 @@ export default {
       const [raw, metaRaw] = await Promise.all([env.THREAT_DATA.get(APT_KEY), env.THREAT_DATA.get(APT_META_KEY)]);
       const body = '{"meta":' + (metaRaw || "null") + ',"data":' + (raw || "null") + "}";
       return new Response(body, { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=3600" } });
+    }
+
+    if (url.pathname === "/api/radar" && request.method === "GET"){
+      return radarForCountry(env, (url.searchParams.get("cc") || "").trim().toUpperCase(), ctx);
     }
 
     if (url.pathname === "/api/ip-check" && request.method === "GET"){
