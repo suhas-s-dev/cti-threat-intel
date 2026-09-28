@@ -1,6 +1,6 @@
 "use strict";
 /**
- * APJ Threat Intelligence — standalone frontend.
+ * Threat Intelligence — standalone frontend. Global, filterable by region, with a per-country page.
  * Pulls pre-tagged, pre-aggregated data from /api/data (populated by the Worker's
  * scheduled collector — see src/worker.js). No client-side fetching, no API keys,
  * no MCP bridge: this runs anywhere as static files behind that one endpoint.
@@ -9,7 +9,34 @@
 const APP_VERSION = "standalone-v1";
 const REFRESH_POLL_MS = 5 * 60 * 1000; // re-poll /api/data every 5 min to pick up the cron's updates
 
-const APJ_CC = { IN:"India", JP:"Japan", CN:"China", KR:"South Korea", TW:"Taiwan", AU:"Australia", NZ:"New Zealand", SG:"Singapore", VN:"Vietnam", TH:"Thailand", ID:"Indonesia", MY:"Malaysia", PH:"Philippines", BD:"Bangladesh", LK:"Sri Lanka", NP:"Nepal", PK:"Pakistan", MM:"Myanmar", KH:"Cambodia", HK:"Hong Kong", MO:"Macau" };
+// Every country the app places in a region — mirrors REGION_CC in src/worker.js (keep them in sync).
+// Anything not listed, and every claim with no country, is "other".
+const REGION_CC = {
+  apj: "IN JP CN KR KP TW AU NZ SG VN TH ID MY PH BD LK NP PK MM KH HK MO LA BN MN MV BT AF KZ UZ KG TJ TM PG FJ TL",
+  eu: "GB IE FR DE ES PT IT NL BE LU CH AT SE NO DK FI IS PL CZ SK HU RO BG GR HR SI RS BA ME MK AL XK EE LV LT UA BY MD RU CY MT LI MC AD SM GE AM AZ",
+  na: "US CA MX GT HN SV NI CR PA BZ CU DO HT JM TT BS BB PR",
+  sa: "BR AR CO CL PE VE EC BO PY UY GY SR",
+  me: "TR SA AE IL IR IQ JO LB SY KW QA BH OM YE EG PS",
+  af: "ZA NG KE MA DZ TN LY GH ET TZ UG SN CI CM AO ZW ZM MZ RW SD SS SO NA BW MU MG CD BF"
+};
+const CC_REGION = {};
+for (const [rg, list] of Object.entries(REGION_CC)) for (const cc of list.split(" ")) CC_REGION[cc] = rg;
+function ccRegion(cc){ return CC_REGION[String(cc || "").toUpperCase()] || "other"; }
+const GEO_KEYS = ["apj", "eu", "na", "sa", "me", "af"];
+// Labels + the categorical colour each region gets on the map, ticker, trend chart and chips. These
+// are the DarkGrid palette's literals (like the rest of drawMap()), not severity colours.
+const REGION_META = {
+  all:   { label: "All regions" },
+  apj:   { label: "APJ",         color: "#ff5b3a" },
+  eu:    { label: "Europe",      color: "#7aa2d6" },
+  na:    { label: "N. America",  color: "#ffb454" },
+  sa:    { label: "S. America",  color: "#5fd3b0" },
+  me:    { label: "Middle East", color: "#c58cf0" },
+  af:    { label: "Africa",      color: "#e8d27a" },
+  other: { label: "Unplaced",    color: "#8ea0b1" }
+};
+function regionLabel(key){ return (REGION_META[key] || REGION_META.other).label; }
+function regionColor(key){ return (REGION_META[key] || REGION_META.other).color; }
 
 const CENTROIDS = {
   IN:[20,78], JP:[36,138], CN:[35,105], KR:[36,128], TW:[23,121], AU:[-25,133], NZ:[-41,174],
@@ -19,66 +46,70 @@ const CENTROIDS = {
   PE:[-10,-76], CR:[9.7,-83.7], GB:[54,-2], DE:[51,10], FR:[46,2], ES:[40,-4], PT:[39.5,-8],
   IT:[43,12], NL:[52,5], BE:[50.5,4.5], CH:[47,8], SE:[62,15], NO:[61,9], DK:[56,10], FI:[64,26],
   PL:[52,19], CZ:[49.8,15.5], AT:[47.5,14.5], IE:[53,-8], RU:[61,105], UA:[49,32], TR:[39,35],
-  ZA:[-29,24], EG:[26,30], SA:[24,45], AE:[24,54], IL:[31,35], IR:[32,53], NG:[9,8]
+  ZA:[-29,24], EG:[26,30], SA:[24,45], AE:[24,54], IL:[31,35], IR:[32,53], NG:[9,8],
+  LU:[49.8,6.1], MT:[35.9,14.4], CY:[35,33], PR:[18.2,-66.5], TT:[10.4,-61.3]
 };
 
-const REGIONS = {
-  world: { lon: null, countries: null },
-  in:    { lon: 78,   countries: ["IN"] },
-  na:    { lon: -100, countries: ["US","CA","MX"] },
-  sa:    { lon: -60,  countries: ["BR","AR","CO","CL","PE","CR"] },
-  eu:    { lon: 12,   countries: ["GB","DE","FR","ES","PT","IT","NL","BE","CH","SE","NO","DK","FI","PL","CZ","AT","IE","UA"] },
-  me:    { lon: 45,   countries: ["TR","SA","AE","IL","IR","EG"] },
-  apac:  { lon: 112,  countries: ["IN","JP","CN","KR","TW","AU","NZ","SG","VN","TH","ID","MY","PH","BD","LK","NP","PK","MM","KH","HK","MO","RU"] }
-};
+// Map scope per region key ("all" = the whole world). Country lists come from REGION_CC.
+const REGIONS = Object.assign({ all: { countries: null } },
+  Object.fromEntries(GEO_KEYS.map(k => [k, { countries: REGION_CC[k].split(" ") }])));
+// Region keys stored by the old India-first UI ("world", "in", "apac") → the current ones.
+function normGeo(key){
+  const k = String(key || "").toLowerCase();
+  if (REGIONS[k]) return k;
+  return { world: "all", in: "apj", apac: "apj" }[k] || "all";
+}
 
 /* ---------------- Actor baseline (curated) ---------------- */
+// `geo` is who each actor is known to target, from its `targets` text: region keys (lowercase),
+// country codes (uppercase), or "global" for actors that hit every region. It drives the region
+// filter and the Geo Intel page — keep it in step with `targets` when editing a profile.
 const ACTORS = [
-  { name:"Transparent Tribe", aka:"APT36 · Earth Karkaddan", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Attributed with high confidence to a Pakistan-nexus threat actor.",
+  { name:"Transparent Tribe", geo:["IN"], aka:"APT36 · Earth Karkaddan", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Attributed with high confidence to a Pakistan-nexus threat actor.",
     overview:"Long-running espionage cluster focused on Indian government, defense, and education sectors. Extensive use of Crimson RAT and ElizaRAT delivered via spearphishing and cloned government portals.",
     targets:"Indian military/defense, government, education", ttps:[["T1566.001","Spearphishing attachment"],["T1204.002","User execution"],["T1105","Ingress tool transfer"],["T1071.001","Web protocols C2"]],
     mit:"App & API Protector for portal spoofing/web delivery; Akamai MFA against credential phishing; EAA to reduce exposed access surface." },
-  { name:"SideCopy", aka:"—", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Assessed with medium-high confidence as Pakistan-nexus; overlaps with Transparent Tribe.",
+  { name:"SideCopy", geo:["IN","AF"], aka:"—", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Assessed with medium-high confidence as Pakistan-nexus; overlaps with Transparent Tribe.",
     overview:"Targets Indian defense, government, Railways, and Oil & Gas entities, mimicking SideWinder TTPs (hence the name); shifted from HTA to MSI staging with reflective DLL loading. 'Operation XENOFISCAL' (mid-2026) extended targeting to Afghanistan's Ministry of Finance via XenoRAT.",
     targets:"Indian defense, government, Railways, Oil & Gas; Afghan MoF (XENOFISCAL)", ttps:[["T1566.002","Spearphishing link"],["T1218.005","Mshta abuse"],["T1036","Masquerading"]],
     mit:"App & API Protector WAF; Client-Side Protection & Compliance for injected script detection; Akamai MFA." },
-  { name:"RedEcho", aka:"threat activity group linked to APT41 infra", origin:"China-nexus", motive:"Espionage / Pre-positioning", p:"P1", conf:"Attributed with medium confidence to a China-nexus actor (Recorded Future reporting).",
+  { name:"RedEcho", geo:["IN"], aka:"threat activity group linked to APT41 infra", origin:"China-nexus", motive:"Espionage / Pre-positioning", p:"P1", conf:"Attributed with medium confidence to a China-nexus actor (Recorded Future reporting).",
     overview:"Targeted Indian power sector and critical infrastructure with ShadowPad implants — assessed as strategic pre-positioning rather than immediate disruption.",
     targets:"Indian power grid, ports, critical infrastructure", ttps:[["T1133","External remote services"],["T1071","C2 over app-layer protocols"],["T1105","ShadowPad delivery"]],
     mit:"Guardicore Segmentation to contain lateral movement in OT-adjacent networks; EAA for third-party access; Security Services IR Retainer." },
-  { name:"APT41", aka:"Winnti · Wicked Panda · Brass Typhoon", origin:"China-nexus", motive:"Espionage + Financial", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
+  { name:"APT41", geo:["apj","IN"], aka:"Winnti · Wicked Panda · Brass Typhoon", origin:"China-nexus", motive:"Espionage + Financial", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Dual-mission group conducting state espionage and financially motivated intrusions. Known for software supply-chain compromises, web-facing app exploitation, and web shells across APJ.",
     targets:"Telecom, healthcare, software, gaming across APJ incl. India", ttps:[["T1195.002","Supply chain compromise"],["T1190","Exploit public-facing app"],["T1505.003","Web shell"]],
     mit:"App & API Protector against edge exploitation; Guardicore Segmentation; Client-Side Protection & Compliance for supply-chain script risk." },
-  { name:"CL-STA-1062", aka:"UAT-7237", origin:"China-nexus", motive:"Espionage (possible IAB)", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor; initial-access-broker role assessed with low confidence.",
+  { name:"CL-STA-1062", geo:["apj","TW"], aka:"UAT-7237", origin:"China-nexus", motive:"Espionage (possible IAB)", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor; initial-access-broker role assessed with low confidence.",
     overview:"State-sponsored espionage cluster active since at least March 2022. Uses the TinyRCT backdoor, web shells, and credential theft; expanded in 2026 from Taiwan web-hosting infrastructure into Southeast Asian electricity/water utilities and government/military targets via SoftEther VPN and Mimikatz.",
     targets:"Southeast Asian energy infrastructure, government", ttps:[["T1505.003","Web shell"],["T1003","Credential dumping"],["T1190","Exploit public-facing app"]],
     mit:"App & API Protector WAF; Guardicore Segmentation; Akamai MFA; Security Services IR Retainer." },
-  { name:"Lazarus Group", aka:"Hidden Cobra · Diamond Sleet", origin:"DPRK", motive:"Financial + Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
+  { name:"Lazarus Group", geo:["global","IN","KR"], aka:"Hidden Cobra · Diamond Sleet", origin:"DPRK", motive:"Financial + Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
     overview:"Prolific DPRK operator: cryptocurrency theft, bank intrusions (incl. 2018 Cosmos Bank ATM cashout in India), supply-chain attacks, and defense-sector espionage across APJ. 2026 watering-hole campaign exploited a South Korean banking-software zero-day (AnySign4PC) via 15 compromised legitimate sites, affecting 70+ organizations.",
     targets:"Financial services, crypto exchanges, defense — APJ-wide incl. India", ttps:[["T1195","Supply chain compromise"],["T1566","Phishing (job-lure)"],["T1621","MFA request abuse"]],
     mit:"Akamai MFA (phish-proof); App & API Protector for exchange/API abuse; Client-Side Protection & Compliance for skimming." },
-  { name:"Kimsuky", aka:"Emerald Sleet · APT43", origin:"DPRK", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
+  { name:"Kimsuky", geo:["apj","KR","JP"], aka:"Emerald Sleet · APT43", origin:"DPRK", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
     overview:"Credential-harvesting and spearphishing specialist targeting think tanks, academia, and government policy circles in Korea, Japan, and wider APJ, incl. India-focused policy targets. 2026 campaign compromised South Korean groupware vendors' mail servers to pivot into customer credentials via new Gomir-family backdoor variants.",
     targets:"Think tanks, academia, government policy — KR/JP/APJ", ttps:[["T1598.003","Credential-harvest spearphishing"],["T1078","Valid accounts"],["T1114","Email collection"]],
     mit:"Akamai MFA; EAA for identity-aware access; App & API Protector." },
-  { name:"Mustang Panda", aka:"Earth Preta · Stately Taurus", origin:"China-nexus", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
+  { name:"Mustang Panda", geo:["apj"], aka:"Earth Preta · Stately Taurus", origin:"China-nexus", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Espionage operator heavily active against Southeast Asian governments; signature PlugX/Korplug delivery via phishing and infected USB media.",
     targets:"SEA governments, NGOs, shipping", ttps:[["T1566.002","Spearphishing link"],["T1091","Removable media replication"],["T1574.002","DLL side-loading"]],
     mit:"Guardicore Segmentation; EAA; App & API Protector." },
-  { name:"Mysterious Team Bangladesh", aka:"MTB", origin:"Bangladesh (hacktivist)", motive:"Ideological — DDoS", p:"P1", conf:"Self-attributed hacktivist collective; claims assessed with medium confidence.",
+  { name:"Mysterious Team Bangladesh", geo:["IN"], aka:"MTB", origin:"Bangladesh (hacktivist)", motive:"Ideological — DDoS", p:"P1", conf:"Self-attributed hacktivist collective; claims assessed with medium confidence.",
     overview:"Hacktivist DDoS collective repeatedly targeting Indian government, financial, and airline web properties with Layer 7 floods and defacements, typically announced on Telegram.",
     targets:"Indian gov portals, BFSI, aviation", ttps:[["T1498","Network DoS"],["T1499.004","Application-layer DoS"],["T1491","Defacement"]],
     mit:"App & API Protector + rate controls for L7 floods; Prolexic-class network-layer defense; bot visibility." },
-  { name:"NoName057(16)", aka:"—", origin:"Russia-aligned (hacktivist)", motive:"Ideological — DDoS", p:"P2", conf:"Self-attributed pro-Russia collective; high confidence in DDoS activity, low in membership claims.",
+  { name:"NoName057(16)", geo:["eu","JP","IT"], aka:"—", origin:"Russia-aligned (hacktivist)", motive:"Ideological — DDoS", p:"P2", conf:"Self-attributed pro-Russia collective; high confidence in DDoS activity, low in membership claims.",
     overview:"Crowdsourced 'DDoSia' Layer 7 attack platform; the single most prolific hacktivist DDoS brand by claim volume, generating an estimated 40.5% of all recorded hacktivist DDoS claims in H1 2026. Primarily targets Europe (incl. a Feb 2026 campaign against Italian government sites tied to the Milano Cortina Winter Olympics) but launched a sustained #OpJapan campaign in Aug 2026 against Japanese transport, government, shipping, insurance, and media targets — a useful bellwether for hacktivist DDoS tradecraft reaching APJ.",
     targets:"Government, transport, BFSI web properties", ttps:[["T1498.002","Reflection amplification"],["T1499.004","Application-layer DoS"]],
     mit:"App & API Protector; edge rate controls; upstream network-layer scrubbing." },
-  { name:"Keymous+", aka:"EliteStress (affiliated DDoS-for-hire platform)", origin:"Self-described North Africa-based; DDoS-as-a-service", motive:"Ideological (claimed) / commercial DDoS-for-hire", p:"P1", conf:"Self-attributed hacktivist brand; analysts assess a dual hacktivist/commercial-DaaS identity with medium confidence — claimed attack volumes are largely self-reported and unverified.",
+  { name:"Keymous+", geo:["global","IN"], aka:"EliteStress (affiliated DDoS-for-hire platform)", origin:"Self-described North Africa-based; DDoS-as-a-service", motive:"Ideological (claimed) / commercial DDoS-for-hire", p:"P1", conf:"Self-attributed hacktivist brand; analysts assess a dual hacktivist/commercial-DaaS identity with medium confidence — claimed attack volumes are largely self-reported and unverified.",
     overview:"Emerged 2023, ramping sharply through 2025 with 700+ claimed DDoS attacks (249 independently confirmed). Became the most aggressive DDoS actor against Indian public healthcare during the 2025-26 India-Pakistan tension period, repeatedly flooding AIIMS and Safdarjung Hospital web infrastructure; no confirmed data breach.",
     targets:"Indian government and public healthcare portals (AIIMS, Safdarjung); opportunistic global targeting", ttps:[["T1498","Network DoS"],["T1499.004","Application-layer DoS"],["T1583.005","Botnet / DDoS-for-hire infrastructure"]],
     mit:"App & API Protector + rate controls for L7 floods; Prolexic-class network-layer defense; bot visibility." },
-  { name:"RuskiNet", aka:"—", origin:"Russia-aligned hacktivist (Eastern Europe)", motive:"Ideological — geopolitical", p:"P2", conf:"Self-attributed pro-Russia hacktivist collective; not yet assessed as state-linked. Confidence in claimed scale/impact is low.",
+  { name:"RuskiNet", geo:["US","CA","IL","GB","TR","IN"], aka:"—", origin:"Russia-aligned hacktivist (Eastern Europe)", motive:"Ideological — geopolitical", p:"P2", conf:"Self-attributed pro-Russia hacktivist collective; not yet assessed as state-linked. Confidence in claimed scale/impact is low.",
     overview:"Blends DDoS, data leaks, and phishing against government and critical-infrastructure targets, opportunistically tying campaigns (incl. 'Operation Trinetara') to geopolitical flashpoints. India named among its targets alongside the US, Canada, Israel, UK, and Turkey; activity trend assessed as declining since mid-2026.",
     targets:"Government and critical infrastructure — US, Canada, Israel, UK, Turkey, India", ttps:[["T1498","Network DoS"],["T1566","Phishing"],["T1567","Exfiltration over web services"]],
     mit:"App & API Protector + rate controls; Akamai MFA against credential phishing; Guardicore Segmentation." }
@@ -90,42 +121,42 @@ const ACTOR_META = {
   "NoName057(16)": ["2026-08-20"], "Keymous+": ["2026-05-15"], "RuskiNet": ["2026-03-01"]
 };
 const GLOBAL_ACTORS = [
-  { name:"Qilin", aka:"Agenda", origin:"Russia-aligned RaaS", motive:"Ransomware", p:"P2", region:"global", last:"2026-08-10",
+  { name:"Qilin", geo:["global","IN"], aka:"Agenda", origin:"Russia-aligned RaaS", motive:"Ransomware", p:"P2", last:"2026-08-10",
     conf:"RaaS operation; affiliate attribution varies. Assessed with high confidence as the dominant ransomware brand by victim volume.",
     overview:"Ransomware-as-a-service operation leading leak-site victim counts (2,100+ claimed victims) amid ecosystem consolidation. Strong Linux/ESXi capability; actively exploiting Palo Alto PAN-OS auth-bypass flaws for initial access; recurring Indian victims.",
     targets:"Cross-sector, global — recurring Indian victims", ttps:[["T1486","Data encrypted for impact"],["T1567","Exfiltration over web services"],["T1078","Valid accounts"]],
     mit:"Guardicore Segmentation to limit blast radius; Akamai MFA against affiliate credential access; Security Services IR Retainer." },
-  { name:"DragonForce", aka:"—", origin:"RaaS cartel", motive:"Ransomware", p:"P2", region:"global", last:"2026-07-14",
+  { name:"DragonForce", geo:["global","IN"], aka:"—", origin:"RaaS cartel", motive:"Ransomware", p:"P2", last:"2026-07-14",
     conf:"Self-styled ransomware 'cartel'; affiliate structure assessed with medium confidence.",
     overview:"Aggressive RaaS/cartel model absorbing affiliates from disrupted brands. Active APJ + Indian manufacturing claims.",
     targets:"Cross-sector, global + APJ incl. India", ttps:[["T1486","Data encrypted for impact"],["T1133","External remote services"],["T1567.002","Exfil to cloud storage"]],
     mit:"Guardicore Segmentation; EAA to replace exposed remote access; IR Retainer." },
-  { name:"Cl0p", aka:"TA505-linked", origin:"Russia-nexus eCrime", motive:"Extortion (mass exploitation)", p:"P2", region:"global", last:"2026-07-20",
+  { name:"Cl0p", geo:["global","IN"], aka:"TA505-linked", origin:"Russia-nexus eCrime", motive:"Extortion (mass exploitation)", p:"P2", last:"2026-07-20",
     conf:"Attributed with high confidence to a Russia-nexus eCrime group.",
     overview:"Specialist in mass exploitation of managed file transfer and enterprise software zero-days (MOVEit, Oracle EBS, and a 2026 PTC Windchill/FlexPLM RCE campaign claiming 1,200+ victims across 54 countries) rather than individual intrusions — cumulative claimed victim count has passed 1,190 since the group's Aug 2020 emergence. Claimed Indian healthcare victims.",
     targets:"Enterprises via file-transfer/ERP zero-days — global incl. India", ttps:[["T1190","Exploit public-facing application"],["T1567","Exfiltration over web services"]],
     mit:"App & API Protector WAF with rapid virtual-patch rules on MFT/ERP CVEs; Guardicore Segmentation." },
-  { name:"Scattered Spider", aka:"UNC3944 · Octo Tempest", origin:"eCrime (native-English)", motive:"Extortion", p:"P1", region:"global", last:"2026-07-02",
+  { name:"Scattered Spider", geo:["na","eu","US","GB"], aka:"UNC3944 · Octo Tempest", origin:"eCrime (native-English)", motive:"Extortion", p:"P1", last:"2026-07-02",
     conf:"High confidence in TTP cluster; loose membership (The Com) complicates attribution.",
     overview:"Social-engineering-led intrusions: helpdesk impersonation, MFA-reset abuse, SIM swap, then SaaS data theft and ESXi ransomware deployment with RaaS partners. Core UK/US members have faced arrests, extraditions, and guilty pleas through mid-2026 (incl. the TfL breach), though the loose 'The Com' membership model limits disruption impact.",
     targets:"Retail, insurance, aviation, SaaS-heavy enterprises", ttps:[["T1656","Impersonation (helpdesk)"],["T1621","MFA request generation"],["T1078.004","Cloud accounts"]],
     mit:"Akamai MFA (phish-proof FIDO2); EAA identity-aware access; helpdesk verification playbooks + IR Retainer." },
-  { name:"ShinyHunters", aka:"UNC6040 overlap", origin:"eCrime collective", motive:"Data-theft extortion", p:"P1", region:"global", last:"2026-07-14",
+  { name:"ShinyHunters", geo:["global"], aka:"UNC6040 overlap", origin:"eCrime collective", motive:"Data-theft extortion", p:"P1", last:"2026-07-14",
     conf:"Cluster overlaps with Scattered Spider ecosystem; assessed with medium confidence.",
     overview:"Large-scale SaaS data-theft extortion via vishing, malicious connected apps, and OAuth token abuse; 2026 activity includes Oracle PeopleSoft PeopleTools zero-day exploitation and growing ecosystem overlap with Scattered Spider and Lapsus$ (tracked by some vendors as 'SLSH').",
     targets:"Salesforce/SaaS tenants of global enterprises", ttps:[["T1566.004","Voice phishing"],["T1528","Steal application access tokens"],["T1530","Data from cloud storage"]],
     mit:"Akamai MFA; Client-Side Protection & Compliance; SaaS OAuth-app governance." },
-  { name:"Sandworm", aka:"APT44 · Seashell Blizzard", origin:"Russia (GRU)", motive:"Espionage + Disruption", p:"P1", region:"global", last:"2026-07-13",
+  { name:"Sandworm", geo:["eu","UA","US"], aka:"APT44 · Seashell Blizzard", origin:"Russia (GRU)", motive:"Espionage + Disruption", p:"P1", last:"2026-07-13",
     conf:"Attributed with high confidence to Russia's GRU.",
     overview:"Destructive and espionage operations against critical infrastructure; known for exploiting vulnerable and misconfigured edge routers.",
     targets:"Critical infrastructure, energy, government — primarily Europe/US, tradecraft globally relevant", ttps:[["T1190","Exploit public-facing application"],["T1542","Pre-OS/router implants"],["T1485","Data destruction"]],
     mit:"Guardicore Segmentation; hardened edge via App & API Protector; DNS posture review." },
-  { name:"Salt Typhoon", aka:"Earth Estries · GhostEmperor overlap", origin:"China-nexus", motive:"Espionage", p:"P2", region:"global", last:"2026-05-15",
+  { name:"Salt Typhoon", geo:["global","US","SG"], aka:"Earth Estries · GhostEmperor overlap", origin:"China-nexus", motive:"Espionage", p:"P2", last:"2026-05-15",
     conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Telecom-focused espionage penetrating carrier core networks and lawful-intercept systems across multiple countries, including APJ operators (Singapore's four national carriers confirmed compromised, per Feb 2026 national assessments). Suspected — not formally confirmed — in a Feb 2026 breach of the FBI's DCSNet wiretap system.",
     targets:"Telecom carriers and ISPs, global incl. APJ", ttps:[["T1190","Exploit public-facing application"],["T1078","Valid accounts"],["T1020","Automated exfiltration"]],
     mit:"Guardicore Segmentation of management planes; EAA for vendor access; App & API Protector." },
-  { name:"TheGentlemen", aka:"—", origin:"eCrime (RaaS)", motive:"Ransomware", p:"P1", region:"global", last:"2026-08-10",
+  { name:"TheGentlemen", geo:["global","IN"], aka:"—", origin:"eCrime (RaaS)", motive:"Ransomware", p:"P1", last:"2026-08-10",
     conf:"Emerging group; assessed with medium confidence as an affiliate-driven RaaS with deliberate India targeting.",
     overview:"Newer leak-site operation (emerged Aug 2025 from a former Qilin affiliate), now the #2 most prolific ransomware brand globally by published victim count, with a striking India concentration across healthcare, manufacturing, and education victims spanning 60+ countries.",
     targets:"Indian healthcare, manufacturing, education; wider Asia", ttps:[["T1486","Data encrypted for impact"],["T1490","Inhibit system recovery"]],
@@ -166,10 +197,26 @@ function renderRankings(){
   if (dEl) dEl.innerHTML = DDOS_RANK.map(rowHtml).join("");
 }
 function mergedActors(){
-  return ACTORS.map(a => Object.assign({}, a, { region: "apj", last: (ACTOR_META[a.name] || ["2025-01-01"])[0] }))
+  return ACTORS.map(a => Object.assign({}, a, { last: (ACTOR_META[a.name] || ["2025-01-01"])[0] }))
     .concat(GLOBAL_ACTORS)
     .sort((a,b) => String(b.last).localeCompare(String(a.last)));
 }
+function actorTargetsRegion(a, key){
+  if (key === "all") return true;
+  return (a.geo || []).some(g => g === "global" || g === key || CC_REGION[g] === key);
+}
+function actorScopeLabel(a){
+  const g = a.geo || [];
+  if (g.includes("global")) return "Global";
+  const regions = [...new Set(g.map(x => x === x.toUpperCase() ? CC_REGION[x] : x).filter(Boolean))];
+  if (regions.length === 1){
+    const ccs = g.filter(x => x === x.toUpperCase());
+    return ccs.length === 1 && !g.includes(regions[0]) ? ccName(ccs[0]) : regionLabel(regions[0]);
+  }
+  return regions.map(regionLabel).join(" · ");
+}
+// Group names as leak sites and profiles write them differ in case/spacing ("Cl0p" / "clop").
+function groupKey(name){ return String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "").replace(/0/g, "o"); }
 
 /* ---------------- State ---------------- */
 let allItems = [];
@@ -179,21 +226,28 @@ let rwNewsItems = [];
 let vulnItems = [];
 let iocItems = [];
 let DATA = { generated: null, vulnGenerated: null, infocon: "green", items: [], victims: [], telegram: [], ransomwareNews: [], iocs: [], vulnerabilities: [], ddosTelemetry: null, sourceStatus: {} };
-let rwFilter = localStorage.getItem("apjti.rwFilter") || "apj";
 let tgFilter = localStorage.getItem("apjti.tgFilter") || "all";
 let sectorFilter = localStorage.getItem("apjti.sectorFilter") || "all";
 let rangeDays = parseInt(localStorage.getItem("apjti.range") || "30", 10);
-let actorFilter = localStorage.getItem("apjti.actorFilter") || "all";
 let vulnFilter = localStorage.getItem("apjti.vulnFilter") || "all";
 let vulnSearch = "";
 let iocFilter = localStorage.getItem("apjti.iocFilter") || "all";
 let iocTypeFilter = localStorage.getItem("apjti.iocTypeFilter") || "all";
 let iocSearch = "";
-let currentRegion = localStorage.getItem("apjti.region") || "world";
+// One region filter shared by every tab (header segment) and the map's region tabs. The old UI kept
+// the map's region under apjti.region, so that's the fallback on first load.
+let geo = normGeo(localStorage.getItem("apjti.geo") || localStorage.getItem("apjti.region"));
+let currentRegion = geo; // the map's scope; same value, kept as its own name for the map code
+let cpCC = (localStorage.getItem("apjti.country") || "").toUpperCase() || null; // Geo Intel page selection
 let CURRENT_ACTORS = [];
 
 /* ---------------- Tab navigation (one section visible at a time) ---------------- */
-const TAB_IDS = ["brief", "ransomware", "vulnerabilities", "telegram", "actors", "map", "iocs"];
+const TAB_IDS = ["brief", "country", "ransomware", "vulnerabilities", "telegram", "actors", "map", "iocs"];
+// "#country/IN" opens the Geo Intel page on India; every other hash is a bare tab id.
+function parseHash(h){
+  const [id, arg] = String(h || "").replace(/^#/, "").split("/");
+  return { id, cc: /^[A-Za-z]{2}$/.test(arg || "") ? arg.toUpperCase() : null };
+}
 let activeTab = "brief";
 function showTab(id, opts){
   if (!TAB_IDS.includes(id)) id = "brief";
@@ -215,7 +269,7 @@ function showTab(id, opts){
     if (a.getAttribute("href").slice(1) === id) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id);
+  if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id + (id === "country" && cpCC ? "/" + cpCC : ""));
   if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
   if (id === "map"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
@@ -226,7 +280,9 @@ function showTab(id, opts){
   // Header bits that only mean something on some tabs (e.g. the Brief's tagline and Markdown
   // export) carry data-only-tabs="brief ..." and are hidden everywhere else.
   document.querySelectorAll("[data-only-tabs]").forEach(el => { el.hidden = !el.dataset.onlyTabs.split(/\s+/).includes(id); });
-  if (id === "actors") loadApt();
+  if (id === "actors" || id === "country") loadApt();
+  if (id === "country") renderCountry();
+  if (cpGlobe){ if (id === "country") cpGlobe.resumeAnimation(); else cpGlobe.pauseAnimation(); }
   document.body.classList.toggle("map-mode", id === "map");
   syncThemeToggle();
 }
@@ -237,8 +293,10 @@ function wireTabs(){
     a.addEventListener("click", e => { e.preventDefault(); showTab(id); });
   });
   window.addEventListener("hashchange", () => {
-    const id = location.hash.slice(1);
-    if (TAB_IDS.includes(id) && id !== activeTab) showTab(id, { skipHash: true });
+    const { id, cc } = parseHash(location.hash);
+    if (!TAB_IDS.includes(id)) return;
+    if (id === "country" && cc && cc !== cpCC){ setCountry(cc, { skipRender: id !== activeTab }); window.scrollTo(0, 0); }
+    if (id !== activeTab) showTab(id, { skipHash: true });
   });
 }
 
@@ -265,7 +323,18 @@ function showError(msg){
   el.textContent = msg;
   el.classList.add("show");
 }
-function regionTagClass(isIndia, isApj){ return isIndia ? "tag-accent" : (isApj ? "tag-outline" : "tag-neutral"); }
+// Region filter predicates. Items carry cc/rg from the worker's geoTag(); loadData() backfills them
+// for blobs written before country tagging existed.
+function victimInGeo(v, key = geo){ return key === "all" || ccRegion(v.cc) === key; }
+function itemInGeo(i, key = geo){ return key === "all" || (i.rg || []).includes(key); }
+function geoLabel(key = geo){ return key === "all" ? "Global" : regionLabel(key); }
+// Country names for an item's cc tags, each linking to that country's page.
+function ccLinks(ccs, max){
+  const list = (ccs || []).slice(0, max || 3);
+  if (!list.length) return "";
+  return list.map(cc => '<a class="tag tag-outline cc-tag" href="#country/' + esc(cc) + '">' + esc(ccName(cc)) + "</a>").join("") +
+    ((ccs || []).length > list.length ? '<span class="tag tag-neutral">+' + ((ccs || []).length - list.length) + "</span>" : "");
+}
 // ransomware.live partially redacts some victim names (e.g. "vi***in") — commonly done for an
 // ongoing negotiation or a legal request on their end, not a data quality issue on ours. Flagged
 // wherever a victim name renders, so it doesn't read as broken data.
@@ -276,15 +345,24 @@ function victimNameHtml(name){
 }
 
 /* ---------------- Data loading ---------------- */
+// Parses the date and makes sure every item has cc/rg arrays. Blobs written before the worker's
+// country tagging only have india/apj booleans; those map to IN / APJ until the next collection
+// re-tags them from their text.
+function normItem(i){
+  const out = Object.assign({}, i, { date: i.date ? new Date(i.date) : null });
+  if (!Array.isArray(out.cc)) out.cc = i.india ? ["IN"] : [];
+  if (!Array.isArray(out.rg)) out.rg = (i.india || i.apj) ? ["apj"] : [];
+  return out;
+}
 async function loadData(){
   const res = await fetch("/api/data");
   if (!res.ok) throw new Error("HTTP " + res.status);
   const json = await res.json();
   DATA = json;
-  allItems = (json.items || []).map(i => Object.assign({}, i, { date: i.date ? new Date(i.date) : null }));
-  rwVictims = (json.victims || []).slice().sort((a,b) => (b.cc==="IN")-(a.cc==="IN") || (b.apj-a.apj) || String(b.date||"").localeCompare(String(a.date||"")));
-  telegramItems = (json.telegram || []).map(i => Object.assign({}, i, { date: i.date ? new Date(i.date) : null }));
-  rwNewsItems = (json.ransomwareNews || []).map(i => Object.assign({}, i, { date: i.date ? new Date(i.date) : null }));
+  allItems = (json.items || []).map(normItem);
+  rwVictims = (json.victims || []).slice().sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")));
+  telegramItems = (json.telegram || []).map(normItem);
+  rwNewsItems = (json.ransomwareNews || []).map(normItem);
   vulnItems = (json.vulnerabilities || []).map(i => Object.assign({}, i, { date: i.date ? new Date(i.date) : null }));
   iocItems = (json.iocs || []).map(i => Object.assign({}, i, { firstSeen: i.firstSeen ? new Date(i.firstSeen) : null }));
 
@@ -351,19 +429,18 @@ function populateSectorFilter(){
 function renderRw(){
   const el = $("#rw");
   populateSectorFilter();
-  document.querySelectorAll("[data-rwf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.rwf === rwFilter)));
-  const oldestIn = rwVictims.filter(v => v.cc === "IN" && v.date).reduce((m,v) => (!m || v.date < m) ? v.date : m, "");
+  const scoped = rwVictims.filter(v => victimInGeo(v));
+  const oldest = scoped.filter(v => v.date).reduce((m,v) => (!m || v.date < m) ? v.date : m, "");
   $("#rw-cov").textContent = rwVictims.length
-    ? "Coverage: " + rwVictims.length + " cached claims" + (oldestIn ? ", oldest India claim from " + String(oldestIn).slice(0,10) : "") + ". Archive grows with every collection cycle."
+    ? "Coverage: " + rwVictims.length + " cached claims" + (geo !== "all" ? ", " + scoped.length + " in " + geoLabel() : "") +
+      (oldest ? ", oldest from " + String(oldest).slice(0,10) : "") + ". Each region keeps its newest claims; the archive grows with every collection cycle."
     : "";
-  let list = rwVictims;
-  if (rwFilter === "apj") list = list.filter(v => v.apj);
-  else if (rwFilter === "global") list = list.filter(v => !v.apj);
+  let list = scoped;
   if (sectorFilter !== "all") list = list.filter(v => v.sector === sectorFilter);
   const rwAnchor = maxDate(rwVictims.map(v => v.date));
   if (rwAnchor) list = list.filter(v => inWindow(v.date, rwAnchor.getTime()));
   if (!list.length){
-    el.innerHTML = '<tr><td colspan="6" class="empty">No ' + (rwFilter === "apj" ? "APJ-country" : rwFilter) + ' victims in the last ' + rangeDays + ' days — widen the time window or switch scope.</td></tr>';
+    el.innerHTML = '<tr><td colspan="6" class="empty">No ' + (geo === "all" ? "" : esc(geoLabel()) + " ") + 'claims in the last ' + rangeDays + ' days — widen the time window or pick another region.</td></tr>';
     return;
   }
   el.innerHTML = list.slice(0, 30).map(v =>
@@ -371,7 +448,7 @@ function renderRw(){
       '<td data-label="Organization">' + victimNameHtml(v.victim) + "</td>" +
       '<td data-label="Sector" class="text-muted">' + esc(v.sector || "—") + "</td>" +
       '<td data-label="Group">' + esc(v.group) + "</td>" +
-      '<td data-label="Region"><span class="tag ' + regionTagClass(v.cc === "IN", v.apj) + '">' + esc(v.cc === "IN" ? "India" : v.country) + "</span></td>" +
+      '<td data-label="Country">' + (v.cc ? '<a class="cc-link" href="#country/' + esc(v.cc) + '"><span class="rg-dot" style="--rc:' + regionColor(ccRegion(v.cc)) + '"></span> ' + esc(ccName(v.cc)) + "</a>" : '<span class="text-muted">Unknown</span>') + "</td>" +
       '<td data-label="Claimed" class="text-muted">' + (v.date ? esc(String(v.date).slice(0,10)) : "—") + "</td>" +
       '<td data-label="Status"><span class="tag tag-outline">Claimed</span></td>' +
     "</tr>"
@@ -383,17 +460,16 @@ function renderRansomwareNews(){
   const el = $("#rw-news-list");
   if (!el) return;
   const anchor = maxDate(rwNewsItems.map(i => i.date));
-  let items = anchor ? rwNewsItems.filter(i => inWindow(i.date, anchor.getTime())) : rwNewsItems.slice();
+  let items = (anchor ? rwNewsItems.filter(i => inWindow(i.date, anchor.getTime())) : rwNewsItems.slice()).filter(i => itemInGeo(i));
   items.sort((a,b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
   if (!items.length){
-    el.innerHTML = '<div class="empty">No community posts in the last ' + rangeDays + ' days.</div>';
+    el.innerHTML = '<div class="empty">No community posts' + (geo === "all" ? "" : " mentioning " + esc(geoLabel())) + ' in the last ' + rangeDays + ' days.</div>';
     return;
   }
   el.innerHTML = items.slice(0, 20).map(i =>
     '<div class="card elev-sm feed-card">' +
       '<div class="feed-card-tags">' +
-        '<span class="tag tag-neutral">' + esc(i.src) + "</span>" +
-        (i.india || i.apj ? '<span class="tag ' + regionTagClass(i.india, i.apj) + '">' + (i.india ? "India P1" : "APJ") + "</span>" : "") +
+        '<span class="tag tag-neutral">' + esc(i.src) + "</span>" + ccLinks(i.cc) +
       "</div>" +
       '<div class="card-title"><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a></div>" +
       (i.desc && i.desc !== i.title ? '<p class="card-body">' + esc(i.desc) + "</p>" : "") +
@@ -409,6 +485,7 @@ function visibleTelegram(){
   else if (tgFilter !== "all") items = items.filter(i => i.channel === tgFilter);
   const anchor = maxDate(telegramItems.map(i => i.date));
   if (anchor) items = items.filter(i => inWindow(i.date, anchor.getTime()));
+  items = items.filter(i => itemInGeo(i));
   items.sort((a,b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
   return items;
 }
@@ -422,14 +499,13 @@ function renderTelegram(){
     : "";
   const items = visibleTelegram();
   if (!items.length){
-    el.innerHTML = '<div class="empty">No Telegram posts match this view in the last ' + rangeDays + ' days.</div>';
+    el.innerHTML = '<div class="empty">No Telegram posts match this view' + (geo === "all" ? "" : " (mentioning " + esc(geoLabel()) + ")") + ' in the last ' + rangeDays + ' days.</div>';
     return;
   }
   el.innerHTML = items.map(i =>
     '<div class="card elev-sm feed-card">' +
       '<div class="feed-card-tags">' +
-        '<span class="tag tag-neutral">' + esc(i.channel) + "</span>" +
-        (i.india || i.apj ? '<span class="tag ' + regionTagClass(i.india, i.apj) + '">' + (i.india ? "India P1" : "APJ") + "</span>" : "") +
+        '<span class="tag tag-neutral">' + esc(i.channel) + "</span>" + ccLinks(i.cc) +
         (i.lens ? '<span class="tag tag-neutral">DDoS · AppSec</span>' : "") +
         (i.claim ? '<span class="tag tag-accent">Actor claim</span>' : "") +
       "</div>" +
@@ -457,16 +533,18 @@ function originFlag(origin){
   return "🌐";
 }
 function renderActors(){
-  let list = mergedActors();
-  if (actorFilter === "apj") list = list.filter(a => a.region === "apj");
-  else if (actorFilter === "global") list = list.filter(a => a.region === "global");
-  document.querySelectorAll("[data-af]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.af === actorFilter)));
+  const list = mergedActors().filter(a => actorTargetsRegion(a, geo));
   CURRENT_ACTORS = list;
-  $("#actors-list").innerHTML = list.map((a, idx) =>
+  $("#actors-list").innerHTML = list.length ? list.map(actorCardHtml).join("") : '<div class="empty">No curated profiles target ' + esc(geoLabel()) + " yet — the directory below covers far more groups.</div>";
+  renderTopTtps();
+  renderRankings();
+}
+function actorCardHtml(a, idx){
+  return (
     '<div class="card elev-sm actor-card" data-i="' + idx + '">' +
       '<div class="actor-hd">' +
         "<div><div class=\"card-title\">" + esc(a.name) + '</div><div class="aka">' + esc(a.aka) + "</div></div>" +
-        '<span class="tag ' + (a.region === "global" ? "tag-neutral" : (a.p === "P1" ? "tag-accent" : "tag-outline")) + '">' + (a.region === "global" ? "Global" : (a.p || "APJ")) + "</span>" +
+        '<span class="tag ' + ((a.geo || []).includes("global") ? "tag-neutral" : "tag-outline") + '">' + esc(actorScopeLabel(a)) + "</span>" +
       "</div>" +
       '<div class="actor-tags">' +
         '<span class="tag tag-neutral">⏱ ' + fmtLast(a.last) + "</span>" +
@@ -484,16 +562,13 @@ function renderActors(){
         '<div class="conf">' + esc(a.conf) + "</div>" +
       "</div>" +
     "</div>"
-  ).join("");
-  renderTopTtps();
-  renderRankings();
+  );
 }
 
 /* ---------------- Actors: APT Groups & Operations community sheet (/api/actors) ---------------- */
 // Loaded lazily the first time the Actors tab opens (~200KB, changes at most daily), not with
 // /api/data. Also enriches the curated cards above with each group's vendor names from the sheet.
 let aptGroups = null, aptChanges = [], aptMeta = null, aptBaseline = null, aptIndex = new Map(), aptLoading = false;
-let aptFilter = localStorage.getItem("apjti.aptFilter") || "apj";
 let aptTab = localStorage.getItem("apjti.aptTab") || "all";
 let aptSearch = "", aptOpen = null;
 const APT_ROW_CAP = 150;
@@ -508,7 +583,9 @@ async function loadApt(){
     aptMeta = j.meta;
     aptBaseline = d.baselineAt || null;
     aptChanges = d.changes || [];
+    // Snapshots parsed before target-country tagging (worker APT_SCHEMA < 2) only have india/apj.
     aptGroups = (d.groups || []).map(g => Object.assign(g, {
+      cc: g.cc || (g.india ? ["IN"] : []), rg: g.rg || ((g.india || g.apj) ? ["apj"] : []),
       _hay: [g.name, g.label, g.mitre, g.malware, ...(g.aliases || []).map(a => a.n), ...(g.ops || [])].filter(Boolean).join(" ").toLowerCase()
     }));
     aptGroups.forEach(g => [g.name, ...(g.aliases || []).map(a => a.n)].forEach(n => {
@@ -522,6 +599,7 @@ async function loadApt(){
   populateAptTabs();
   renderApt();
   renderActors(); // re-render curated cards now that sheet aliases are available
+  if (activeTab === "country") renderCountry();
 }
 // Curated profile → sheet group, via its name or any "aka" token ("APT36 · Earth Karkaddan").
 function aptMatch(a){
@@ -564,23 +642,22 @@ function populateAptTabs(){
 }
 function visibleApt(){
   let list = aptGroups || [];
-  // A search looks across every group — "Fancy Bear" shouldn't come back empty just because the
-  // India / APJ toggle is on. The country-tab filter still applies.
+  // A search looks across every group — "Fancy Bear" shouldn't come back empty just because a
+  // region is picked. The country-tab filter still applies.
   if (aptSearch) list = list.filter(g => g._hay.includes(aptSearch));
-  else if (aptFilter === "apj") list = list.filter(g => g.apj || g.india);
+  else if (geo !== "all") list = list.filter(g => g.rg.includes(geo));
   if (aptTab !== "all") list = list.filter(g => g.tab === aptTab);
-  return list.slice().sort((a, b) => (!!b.india - !!a.india) || (a.label || a.name).localeCompare(b.label || b.name));
+  return list.slice().sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
 }
 function fmtDay(iso){ return iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—"; }
 function renderApt(){
   const el = $("#apt-list");
   if (!el) return;
-  document.querySelectorAll("[data-aptf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.aptf === aptFilter)));
   const metaEl = $("#apt-meta"), chEl = $("#apt-changes");
   if (!aptGroups){ return; }
   const st = (aptMeta && aptMeta.status) || {};
   if (metaEl) metaEl.textContent = aptGroups.length
-    ? aptGroups.length + " groups · " + aptGroups.filter(g => g.apj || g.india).length + " India/APJ-linked · checked " + fmtDay(aptMeta && aptMeta.checkedAt) + (st.ok === false ? " · last check failed: " + st.error : "")
+    ? aptGroups.length + " groups" + (geo !== "all" ? " · " + aptGroups.filter(g => g.rg.includes(geo)).length + " target " + geoLabel() : "") + " · checked " + fmtDay(aptMeta && aptMeta.checkedAt) + (st.ok === false ? " · last check failed: " + st.error : "")
     : (st.error ? "Unavailable — " + st.error : "Not collected yet — runs daily at 03:17 UTC, or POST /api/refresh-actors.");
   if (chEl){
     chEl.innerHTML = aptChanges.length
@@ -595,7 +672,7 @@ function renderApt(){
   const rows = list.slice(0, APT_ROW_CAP).map(g => {
     const row = '<tr class="apt-row" data-id="' + esc(g.id) + '">' +
       '<td data-label="Group"><b>' + esc(g.label || g.name) + "</b>" + (g.label ? ' <span class="apt-alias">(' + esc(g.name) + ")</span>" : "") +
-        (g.india ? ' <span class="tag tag-accent">India</span>' : "") + "</td>" +
+        "</td>" +
       '<td data-label="Sheet tab" class="text-muted">' + esc(g.tab) + "</td>" +
       '<td data-label="Also known as">' + esc(aptAliasText(g, 8) || "—") + "</td>" +
       '<td data-label="MITRE">' + aptMitreLink(g.mitre) + "</td>" +
@@ -617,11 +694,6 @@ function renderApt(){
   el.innerHTML = rows + (list.length > APT_ROW_CAP ? '<tr><td colspan="5" class="empty">Showing ' + APT_ROW_CAP + " of " + list.length + " — search or pick a country to narrow.</td></tr>" : "");
 }
 function wireApt(){
-  document.querySelectorAll("[data-aptf]").forEach(c => c.addEventListener("click", () => {
-    aptFilter = c.dataset.aptf;
-    localStorage.setItem("apjti.aptFilter", aptFilter);
-    renderApt();
-  }));
   const sel = $("#apt-tab-filter");
   if (sel) sel.addEventListener("change", e => { aptTab = e.target.value; localStorage.setItem("apjti.aptTab", aptTab); renderApt(); });
   const search = $("#apt-search");
@@ -644,21 +716,28 @@ function wireApt(){
 function renderSnapshot(){
   const el = $("#snapshot");
   if (!el) return;
+  el.classList.remove("bempty"); // the "Loading…" placeholder style
   const anchor = maxDate(allItems.map(i => i.date));
   const items = anchor ? allItems.filter(i => inWindow(i.date, anchor.getTime())) : allItems;
   const rwAnchor = maxDate(rwVictims.map(v => v.date));
   const rw = rwAnchor ? rwVictims.filter(v => inWindow(v.date, rwAnchor.getTime())) : rwVictims;
-  const stats = [
-    { label: "India-tagged items", value: items.filter(i => i.india).length },
-    { label: "APJ-tagged items", value: items.filter(i => i.apj).length },
-    { label: "DDoS / AppSec lens", value: items.filter(i => i.lens).length },
-    { label: "Ransomware claims", value: rw.length }
-  ];
-  const max = Math.max(1, ...stats.map(s => s.value));
-  el.innerHTML = stats.map(s =>
-    '<div class="snap-row"><div class="snap-hdr"><span>' + esc(s.label) + '</span><b>' + s.value + '</b></div>' +
-    '<div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.round((s.value / max) * 100) + '%"></div></div></div>'
-  ).join("");
+  // Per region: leak-site claims against it and news items naming it, each with its own bar scaled
+  // to that column's max, so both read correctly and the two counts are never mixed. Ordered by
+  // claims (the complete-coverage signal); the selected region is pinned first and highlighted.
+  const rows = GEO_KEYS.map(k => ({ k, news: items.filter(i => i.rg.includes(k)).length, claims: rw.filter(v => ccRegion(v.cc) === k).length }))
+    .sort((a, b) => (b.k === geo) - (a.k === geo) || b.claims - a.claims || b.news - a.news);
+  const maxC = Math.max(1, ...rows.map(r => r.claims)), maxN = Math.max(1, ...rows.map(r => r.news));
+  const bar = (n, max) => '<span class="snap-num">' + n + '</span><div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.round(n / max * 100) + '%"></div></div>';
+  const tagged = items.filter(i => i.rg.length).length;
+  const lens = items.filter(i => i.lens && itemInGeo(i)).length;
+  el.innerHTML = '<div class="snap-grid">' +
+    '<span class="snap-h">Region</span><span class="snap-h" title="Ransomware leak-site claims against the region">Claims</span><span class="snap-h" title="Feed items naming a country in the region">News</span>' +
+    rows.map(r => '<span class="snap-rg' + (r.k === geo ? " on" : "") + '"><span class="rg-dot" style="--rc:' + regionColor(r.k) + '"></span>' + esc(regionLabel(r.k)) + "</span>" +
+      '<span class="snap-cell">' + bar(r.claims, maxC) + "</span>" + '<span class="snap-cell">' + bar(r.news, maxN) + "</span>").join("") +
+    "</div>" +
+    '<div class="snap-foot"><span>DDoS / AppSec lens items' + (geo === "all" ? "" : " · " + esc(geoLabel())) + "</span><b>" + lens + "</b></div>" +
+    '<p class="text-muted" style="font-size:11.5px;margin:6px 0 0">Last ' + rangeDays + " days. " + rw.length + " claims, " + items.length + " feed items — " + tagged +
+      " of them name a country (most of the rest are CVE and IOC feeds, which carry no geography).</p>";
 }
 
 /* ---------------- Rendering: critical vulnerabilities (CISA KEV) ---------------- */
@@ -760,7 +839,23 @@ function laneX(id){
   return MATRIX_LANE[0] + 0.15 + (h % 1000) / 1000 * (MATRIX_LANE[1] - MATRIX_LANE[0] - 0.3);
 }
 let chartVulnMatrixInst = null;
-const RW_INDIA_CAP = 300; // = VICTIM_CAPS.india in src/worker.js
+// = VICTIM_CAPS in src/worker.js: each region keeps its newest N claims.
+const VICTIM_CAPS = { na: 500, eu: 500, apj: 400, sa: 150, me: 150, af: 100, other: 200 };
+// Earliest time from which the stored claims for these regions are complete: a region whose bucket
+// is full has lost everything older than its oldest kept claim; one below its cap hasn't (back to
+// the oldest claim collected at all). Used so period-over-period deltas never compare against a
+// period the cache only partly covers.
+function rwCompleteSince(regions){
+  let since = -Infinity, oldest = Infinity;
+  for (const r of regions){
+    const times = rwVictims.filter(v => ccRegion(v.cc) === r).map(v => new Date(v.date).getTime()).filter(t => !isNaN(t));
+    if (!times.length) continue;
+    const min = Math.min(...times);
+    oldest = Math.min(oldest, min);
+    if (times.length >= VICTIM_CAPS[r]) since = Math.max(since, min);
+  }
+  return oldest === Infinity ? null : Math.max(since, oldest);
+}
 // Read from <html>, not <body>: body.map-mode forces the dark tokens while the Map tab is open, and the
 // matrix can re-render then (5-min poll, theme toggle) — it would keep dark colours in light theme.
 function cssToken(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -965,9 +1060,7 @@ function renderIocs(){
 function renderTopTtps(){
   const el = $("#top-ttps");
   if (!el) return;
-  let list = mergedActors();
-  if (actorFilter === "apj") list = list.filter(a => a.region === "apj");
-  else if (actorFilter === "global") list = list.filter(a => a.region === "global");
+  const list = mergedActors().filter(a => actorTargetsRegion(a, geo));
   const counts = {};
   list.forEach(a => (a.ttps || []).forEach(([id, name]) => {
     if (!counts[id]) counts[id] = { id, name, count: 0 };
@@ -993,22 +1086,18 @@ function renderKpis(){
   const labelMap = { green: "Low", yellow: "Elevated", orange: "High", red: "Severe" };
   const rwAnchor = maxDate(rwVictims.map(v => v.date));
   const rw = rwAnchor ? rwVictims.filter(v => inWindow(v.date, rwAnchor.getTime())) : rwVictims;
-  const rwIndia = rw.filter(v => v.cc === "IN").length;
-  const rwApj = rw.filter(v => v.apj || v.cc === "IN").length;
+  const rwScope = rw.filter(v => victimInGeo(v)).length;
   const kevWeek = (DATA.kev || []).filter(k => { const a = daysAgo(k.dateAdded); return a !== null && a <= 7; });
   const kevRw = kevWeek.filter(k => k.ransomware).length;
   // Change vs the previous period of equal length — only when the stored data reaches back that far,
-  // otherwise it would report a fake drop. worker.js keeps India claims in their own capped bucket
-  // (VICTIM_CAPS.india), newest first, so below the cap the oldest India claim marks where India
-  // coverage starts. kev is capped at 100 the same way.
-  let rwIndiaDelta = null, kevDelta = null;
-  const indiaAll = rwVictims.filter(v => v.cc === "IN");
-  if (rwAnchor && indiaAll.length < RW_INDIA_CAP){
+  // otherwise it would report a fake drop (see rwCompleteSince()). kev is capped at 100 the same way.
+  let rwDelta = null, kevDelta = null;
+  if (rwAnchor){
     const span = rangeDays * 86400000, cur = rwAnchor.getTime() - span, prev = cur - span;
-    const times = indiaAll.map(v => new Date(v.date).getTime()).filter(t => !isNaN(t));
-    if (times.length && Math.min(...times) <= prev){
-      const prevIndia = rwVictims.filter(v => { const t = new Date(v.date).getTime(); return v.cc === "IN" && t >= prev && t < cur; }).length;
-      rwIndiaDelta = [rwIndia - prevIndia, "vs previous " + rangeDays + " days"];
+    const since = rwCompleteSince(geo === "all" ? [...GEO_KEYS, "other"] : [geo]);
+    if (since !== null && since <= prev){
+      const prevN = rwVictims.filter(v => { const t = new Date(v.date).getTime(); return victimInGeo(v) && t >= prev && t < cur; }).length;
+      rwDelta = [rwScope - prevN, "vs previous " + rangeDays + " days"];
     }
   }
   const kevAges = (DATA.kev || []).map(k => daysAgo(k.dateAdded)).filter(a => a !== null);
@@ -1024,7 +1113,7 @@ function renderKpis(){
     '<div class="s">' + esc(sub) + "</div>" + deltaHtml(delta) + "</div>";
   el.innerHTML =
     tile("infocon lvl-" + level, "INFOCON", labelMap[level] || level, "", "SANS Internet Storm Center level") +
-    tile("", "India ransomware claims", rwIndia, "of " + rwApj + " APJ" + (rw.length > rwApj ? " · " + rw.length + " global" : ""), "Leak-site claims, last " + rangeDays + " days — unconfirmed", rwIndiaDelta) +
+    tile("", (geo === "all" ? "" : geoLabel() + " ") + "ransomware claims", rwScope, geo === "all" ? "" : "of " + rw.length + " worldwide", "Leak-site claims, last " + rangeDays + " days — unconfirmed", rwDelta) +
     tile("", "KEV added", kevWeek.length, kevRw ? kevRw + " with ransomware use" : "", "CISA Known Exploited, last 7 days", kevDelta) +
     tile("", "EPSS ≥ 50%", epssHigh, "/ " + vulnItems.length + " CVEs tracked", "Likely exploited within 30 days (FIRST.org)");
 }
@@ -1047,14 +1136,24 @@ function srcLinks(items){
 function bulletLi(boldPart, rest, items){
   return "<li>" + (boldPart ? "<b>" + esc(boldPart) + ":</b> " : "") + esc(rest) + srcLinks(items || []) + "</li>";
 }
+// Brief sections, shared by the page and the Markdown export. With a region picked it leads with that
+// region; with "All" it leads with the newest developments, then a per-region pulse.
+function briefSections(pool, victims){
+  const scoped = pool.filter(i => itemInGeo(i));
+  const rw = victims.filter(v => victimInGeo(v));
+  const lens = scoped.filter(i => i.lens);
+  if (geo === "all"){
+    const pulse = GEO_KEYS.map(k => {
+      const its = pool.filter(i => i.rg.includes(k));
+      return { k, items: its, claims: victims.filter(v => ccRegion(v.cc) === k).length };
+    }).filter(r => r.items.length || r.claims);
+    return { lead: { title: "Key developments", items: pool }, rw, lens, pulse, rest: null };
+  }
+  return { lead: { title: geoLabel() + " — priority", items: scoped }, rw, lens, pulse: null,
+    rest: { title: "Elsewhere — key developments", items: pool.filter(i => !itemInGeo(i)) } };
+}
 function renderStructuredBrief(pool, victims){
-  const india = pool.filter(i => i.india);
-  const apjOnly = pool.filter(i => i.apj && !i.india);
-  const lens = pool.filter(i => i.lens);
-  const global = pool.filter(i => !i.apj);
-  const rwIndia = victims.filter(v => v.cc === "IN").slice(0, 6);
-  const rwOther = victims.filter(v => v.cc !== "IN").slice(0, 6);
-
+  const b = briefSections(pool, victims);
   function newsBullets(list, max){
     if (!list.length) return '<div class="bempty">Nothing notable in this window.</div>';
     return '<ul class="blist">' + list.slice(0, max || 6).map(i => bulletLi(null, i.title + (i.desc ? " — " + i.desc.slice(0,140) : ""), [i])).join("") + "</ul>";
@@ -1062,15 +1161,18 @@ function renderStructuredBrief(pool, victims){
   function rwBullets(list){
     if (!list.length) return '<div class="bempty">No claims in this window.</div>';
     return '<ul class="blist">' + list.map(v =>
-      "<li><b>" + esc(v.group) + ":</b> claims " + esc(v.victim) + (v.sector ? " (" + esc(v.sector) + ")" : "") + " — " + esc(v.country) + (v.date ? ", " + esc(String(v.date).slice(0,10)) : "") + "</li>"
+      "<li><b>" + esc(v.group) + ":</b> claims " + esc(v.victim) + (v.sector ? " (" + esc(v.sector) + ")" : "") + " — " +
+      (v.cc ? '<a class="cc-link" href="#country/' + esc(v.cc) + '">' + esc(ccName(v.cc)) + "</a>" : "unknown country") + (v.date ? ", " + esc(String(v.date).slice(0,10)) : "") + "</li>"
     ).join("") + "</ul>";
   }
-
   let html = "";
-  html += '<div class="bsec pri"><div class="bhdr"><span class="n">1</span> India / APJ — Priority</div>' + newsBullets(india.concat(apjOnly), 8) + "</div>";
-  html += '<div class="bsec"><div class="bhdr">Ransomware Watch — India first</div>' + rwBullets(rwIndia.concat(rwOther).slice(0,8)) + "</div>";
-  html += '<div class="bsec"><div class="bhdr">DDoS &amp; AppSec Lens</div>' + newsBullets(lens, 6) + "</div>";
-  html += '<div class="bsec"><div class="bhdr">Global — Key Developments</div>' + newsBullets(global, 6) + "</div>";
+  html += '<div class="bsec pri"><div class="bhdr"><span class="n">1</span> ' + esc(b.lead.title) + "</div>" + newsBullets(b.lead.items, 8) + "</div>";
+  html += '<div class="bsec"><div class="bhdr">Ransomware Watch' + (geo === "all" ? "" : " — " + esc(geoLabel())) + "</div>" + rwBullets(b.rw.slice(0, 8)) + "</div>";
+  html += '<div class="bsec"><div class="bhdr">DDoS &amp; AppSec Lens</div>' + newsBullets(b.lens, 6) + "</div>";
+  if (b.pulse) html += '<div class="bsec"><div class="bhdr">Regional pulse</div>' + (b.pulse.length ? '<ul class="blist">' + b.pulse.map(r =>
+    '<li><b><span class="rg-dot" style="--rc:' + regionColor(r.k) + '"></span> ' + esc(regionLabel(r.k)) + ":</b> " + r.items.length + " items, " + r.claims + " ransomware claims" +
+      (r.items[0] ? " — latest: " + esc(r.items[0].title) + srcLinks([r.items[0]]) : "") + "</li>").join("") + "</ul>" : '<div class="bempty">No regional signal yet.</div>') + "</div>";
+  if (b.rest) html += '<div class="bsec"><div class="bhdr">' + esc(b.rest.title) + "</div>" + newsBullets(b.rest.items, 6) + "</div>";
   return html;
 }
 function makeBrief(){
@@ -1086,27 +1188,31 @@ function makeBrief(){
 /* ---------------- Markdown export ---------------- */
 function buildMarkdown(){
   const pool = allItems.slice().sort((a,b) => (b.date?b.date.getTime():0) - (a.date?a.date.getTime():0));
-  const india = pool.filter(i => i.india), apjOnly = pool.filter(i => i.apj && !i.india);
-  const lens = pool.filter(i => i.lens), global = pool.filter(i => !i.apj);
-  const rwIndia = rwVictims.filter(v => v.cc === "IN").slice(0,8);
-  const rwOther = rwVictims.filter(v => v.cc !== "IN").slice(0,8);
+  const b = briefSections(pool, rwVictims);
   const lines = [];
-  lines.push("# Threat Intelligence Brief — " + new Date().toISOString().slice(0,10));
+  lines.push("# Threat Intelligence Brief — " + (geo === "all" ? "" : geoLabel() + " — ") + new Date().toISOString().slice(0,10));
   lines.push("");
-  lines.push("India first, then APJ, then global. INFOCON: " + (DATA.infocon || "green").toUpperCase() + " (SANS ISC).");
+  lines.push("Scope: " + (geo === "all" ? "global" : geoLabel()) + ". INFOCON: " + (DATA.infocon || "green").toUpperCase() + " (SANS ISC).");
   lines.push("");
-  lines.push("## India / APJ — Priority");
-  india.concat(apjOnly).slice(0,10).forEach(i => lines.push("- **" + i.title + "** (" + i.src + (i.link ? ", " + i.link : "") + ")"));
+  lines.push("## " + b.lead.title);
+  b.lead.items.slice(0,10).forEach(i => lines.push("- **" + i.title + "** (" + i.src + (i.link ? ", " + i.link : "") + ")"));
   lines.push("");
   lines.push("## Ransomware Watch");
-  rwIndia.concat(rwOther).slice(0,10).forEach(v => lines.push("- **" + v.group + "**: " + v.victim + (v.sector ? " (" + v.sector + ")" : "") + " — " + v.country + (v.date ? ", " + String(v.date).slice(0,10) : "")));
+  b.rw.slice(0,10).forEach(v => lines.push("- **" + v.group + "**: " + v.victim + (v.sector ? " (" + v.sector + ")" : "") + " — " + (v.cc ? ccName(v.cc) : "unknown country") + (v.date ? ", " + String(v.date).slice(0,10) : "")));
   lines.push("");
   lines.push("## DDoS / AppSec Lens");
-  lens.slice(0,8).forEach(i => lines.push("- " + i.title + " (" + i.src + ")"));
+  b.lens.slice(0,8).forEach(i => lines.push("- " + i.title + " (" + i.src + ")"));
   lines.push("");
-  lines.push("## Global");
-  global.slice(0,8).forEach(i => lines.push("- " + i.title + " (" + i.src + ")"));
-  lines.push("");
+  if (b.pulse){
+    lines.push("## Regional pulse");
+    b.pulse.forEach(r => lines.push("- **" + regionLabel(r.k) + "**: " + r.items.length + " items, " + r.claims + " ransomware claims" + (r.items[0] ? " — latest: " + r.items[0].title : "")));
+    lines.push("");
+  }
+  if (b.rest){
+    lines.push("## " + b.rest.title);
+    b.rest.items.slice(0,8).forEach(i => lines.push("- " + i.title + " (" + i.src + ")"));
+    lines.push("");
+  }
   lines.push("_Generated " + new Date().toISOString() + " from open-source collection. Ransomware entries are leak-site claims, not confirmed breaches._");
   return lines.join("\n");
 }
@@ -1115,7 +1221,7 @@ function downloadMarkdown(){
   const blob = new Blob([md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = "apj-threat-brief-" + new Date().toISOString().slice(0,10) + ".md";
+  a.href = url; a.download = "threat-brief-" + (geo === "all" ? "global" : geo) + "-" + new Date().toISOString().slice(0,10) + ".md";
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
@@ -1129,14 +1235,14 @@ function buildTrendSeries(){
   const buckets = [];
   for (let i = days - 1; i >= 0; i--){
     const d = new Date(anchor.getTime() - i * 86400000);
-    buckets.push({ key: d.toISOString().slice(0,10), india: 0, apj: 0, global: 0 });
+    buckets.push(Object.assign({ key: d.toISOString().slice(0,10) }, Object.fromEntries(GEO_KEYS.map(k => [k, 0]))));
   }
   const byKey = Object.fromEntries(buckets.map(b => [b.key, b]));
   allItems.forEach(i => {
     if (!i.date) return;
     const b = byKey[i.date.toISOString().slice(0,10)];
     if (!b) return;
-    if (i.india) b.india++; else if (i.apj) b.apj++; else b.global++;
+    i.rg.forEach(k => { if (k in b) b[k]++; }); // an item naming two regions counts in both
   });
   return { buckets, capped: days < rangeDays };
 }
@@ -1175,19 +1281,20 @@ const ISO_NUM = {
   "191":"HR","688":"RS","703":"SK","705":"SI","860":"UZ","496":"MN","112":"BY","512":"OM","048":"BH","008":"AL"
 };
 const REGION_VIEW = { // [lonMin, lonMax, latMin, latMax]
-  world: [-160, 182, -56, 76], in: [62, 98, 5, 37], apac: [58, 182, -48, 52], na: [-168, -50, 8, 72],
-  sa: [-95, -30, -56, 14], eu: [-25, 45, 34, 71], me: [22, 66, 10, 44]
+  all: [-160, 182, -56, 76], apj: [58, 182, -48, 55], na: [-168, -55, 5, 72],
+  sa: [-95, -30, -56, 14], eu: [-25, 45, 34, 71], me: [22, 66, 10, 44], af: [-20, 55, -36, 38]
 };
-const MAP_COLORS = { IN: [255, 91, 58], APJ: [255, 180, 84], OTHER: [122, 162, 214] };
+// Map dots/pings are coloured by the victim country's region (REGION_META), as [r, g, b].
+const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const MAP_COLORS = Object.fromEntries(Object.keys(REGION_META).filter(k => k !== "all").map(k => [k, hexRgb(regionColor(k))]));
 const ARC_PALETTE = ["#ff5b3a", "#ffb454", "#e8d27a", "#7aa2d6", "#c58cf0", "#5fd3b0", "#f07fa8", "#9aa3b5"];
 const REDUCED_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const regionNames = (() => { try { return new Intl.DisplayNames(["en"], { type: "region" }); } catch (_){ return null; } })();
 function ccName(cc){
   if (!cc) return "Unknown";
-  if (APJ_CC[cc]) return APJ_CC[cc];
   try { return (regionNames && regionNames.of(cc)) || cc; } catch (_){ return cc; }
 }
-function ccCategory(cc){ return cc === "IN" ? "IN" : (APJ_CC[cc] ? "APJ" : "OTHER"); }
+function ccCategory(cc){ return ccRegion(cc); }
 function rgba(c, a){ return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")"; }
 
 let landMask = null, maskCountries = [], maskCentroid = {}, mapAtlasState = "idle";
@@ -1333,8 +1440,7 @@ function renderMapSide(ranked, total){
   const top = ranked.slice(0, 10), max = Math.max(1, ...top.map(r => r[1]));
   $("#dg-rank-meta").textContent = total + " claims";
   rankEl.innerHTML = top.length ? top.map(([cc, n], i) => {
-    const cat = ccCategory(cc).toLowerCase();
-    return '<li><button type="button" class="dg-rank-row cat-' + cat + (mapScene.focus === cc ? " on" : "") + '" data-cc="' + esc(cc) + '">' +
+    return '<li><button type="button" class="dg-rank-row' + (mapScene.focus === cc ? " on" : "") + '" style="--rc:' + regionColor(ccRegion(cc)) + '" data-cc="' + esc(cc) + '">' +
       '<span class="rk">' + String(i + 1).padStart(2, "0") + '</span><span class="nm">' + esc(ccName(cc)) + '</span>' +
       '<span class="ct">' + n + '</span><span class="bar"><i style="width:' + (n / max * 100).toFixed(1) + '%"></i></span></button></li>';
   }).join("") : '<li class="dg-empty">No claims in this scope.</li>';
@@ -1546,9 +1652,9 @@ function showMapTip(cc, x, y){
   const sectors = {};
   all.forEach(v => { if (v.sector) sectors[v.sector] = (sectors[v.sector] || 0) + 1; });
   const topS = Object.entries(sectors).sort((a, b) => b[1] - a[1])[0];
-  tip.innerHTML = '<div class="tip-hd cat-' + ccCategory(cc).toLowerCase() + '"><span>' + esc(ccName(cc)) + '</span><b>' + all.length + '</b></div>' +
+  tip.innerHTML = '<div class="tip-hd" style="--rc:' + regionColor(ccRegion(cc)) + '"><span>' + esc(ccName(cc)) + '</span><b>' + all.length + '</b></div>' +
     (all.length ? '<div class="tip-row"><span>Top groups</span>' + topG.map(([g2, n]) => esc(g2) + " <i>" + n + "</i>").join(" · ") + '</div>' +
-      (topS ? '<div class="tip-row"><span>Top sector</span>' + esc(topS[0]) + '</div>' : "") + '<div class="tip-foot">Click to focus</div>'
+      (topS ? '<div class="tip-row"><span>Top sector</span>' + esc(topS[0]) + '</div>' : "") + '<div class="tip-foot">Click to focus · then open its country profile</div>'
       : '<div class="tip-row"><span>No leak-site claims tracked</span></div>');
   tip.hidden = false;
   const wrap = $("#dg-map-wrap").getBoundingClientRect();
@@ -1609,9 +1715,8 @@ function buildTicker(regionKey, singleCC){
   if (!track) return;
   const pool = scopePool(regionKey || currentRegion, singleCC);
   const items = pool.slice(0, 24).map(v => {
-    const cls = v.cc === "IN" ? "tk-in" : (v.apj ? "tk-apj" : "tk-other");
     const tag = v.cc || "??";
-    return '<div class="tk-item"><span class="tk-tag ' + cls + '">' + esc(tag) + '</span><div class="tk-body"><b>' + esc(v.group.toUpperCase()) +
+    return '<div class="tk-item"><span class="tk-tag" style="--rc:' + regionColor(ccRegion(v.cc)) + '">' + esc(tag) + '</span><div class="tk-body"><b>' + esc(v.group.toUpperCase()) +
       '</b> <span class="tk-arrow">▸</span> ' + victimNameHtml(v.victim) + '<div class="tk-meta">' + (v.sector ? esc(v.sector) + " · " : "") +
       esc(String(v.date).slice(0,10)) + "</div></div></div>";
   });
@@ -1623,12 +1728,12 @@ function buildTicker(regionKey, singleCC){
 // filters the Live Claim Feed, ranked list, stats and arcs to it.
 function focusCountry(cc, opts){
   document.querySelectorAll(".dg-rtab").forEach(t => t.classList.remove("active"));
-  buildMapScene(cc, "world");
-  buildTicker("world", cc);
-  renderDashStats("world", cc);
+  buildMapScene(cc, "all");
+  buildTicker("all", cc);
+  renderDashStats("all", cc);
   const c = posOf(cc);
   if (c){
-    const span = cc === "IN" ? 30 : (["US","CA","RU","CN","BR","AU"].includes(cc) ? 70 : 34);
+    const span = ["US","CA","RU","CN","BR","AU"].includes(cc) ? 70 : 34;
     setMapTarget([c[1] - span, c[1] + span, c[0] - span * 0.42, c[0] + span * 0.42]);
   }
   // Skipped while the user is still typing in the locate box — setting input.value mid-keystroke
@@ -1637,6 +1742,13 @@ function focusCountry(cc, opts){
     const input = $("#dg-locate");
     if (input) input.value = ccName(cc);
   }
+  syncMapProfileLink(cc);
+}
+function syncMapProfileLink(cc){
+  const a = $("#dg-profile");
+  if (!a) return;
+  a.hidden = !cc;
+  if (cc){ a.href = "#country/" + cc; a.textContent = ccName(cc) + " profile →"; }
 }
 
 function renderBanner(){
@@ -1647,21 +1759,24 @@ function renderBanner(){
   const labelMap = { green: "LOW", yellow: "ELEVATED", orange: "HIGH", red: "SEVERE" };
   const cveSet = new Set();
   allItems.forEach(i => { const m = (i.title + " " + (i.desc||"")).match(/CVE-\d{4}-\d{4,7}/gi); if (m) m.forEach(c => cveSet.add(c.toUpperCase())); });
-  const indiaSignals = allItems.filter(i => i.india).length + rwVictims.filter(v => v.cc === "IN").length;
+  const scopeSignals = allItems.filter(i => itemInGeo(i)).length + rwVictims.filter(v => victimInGeo(v)).length;
   $("#dg-banner-text").innerHTML = "<b>INFOCON " + esc(level.toUpperCase()) + " · " + (labelMap[level]||"—") + "</b><span class=\"sep\"></span>SANS Internet Storm Center<span class=\"sep\"></span>" +
-    indiaSignals + " India-priority signals · " + cveSet.size + " CVEs tracked <span class=\"dim\">(our own volume heuristic, not an official alert)</span>";
+    scopeSignals + " signals " + (geo === "all" ? "worldwide" : "in " + esc(geoLabel())) + " · " + cveSet.size + " CVEs tracked <span class=\"dim\">(our own volume heuristic, not an official alert)</span>";
 }
+// The map's region tabs and the header's region filter are one setting (setGeo()); this just moves
+// the map to it and clears any country focus.
 function selectRegion(key){
-  if (!REGIONS[key]) key = "world";
+  key = normGeo(key);
+  if (key !== geo){ setGeo(key); return; } // setGeo() re-renders everything, including this
   currentRegion = key;
-  localStorage.setItem("apjti.region", key);
   document.querySelectorAll(".dg-rtab").forEach(t => { const on = t.dataset.region === key; t.classList.toggle("active", on); t.setAttribute("aria-selected", String(on)); });
-  setMapTarget(REGION_VIEW[key] || REGION_VIEW.world);
+  setMapTarget(REGION_VIEW[key] || REGION_VIEW.all);
   const input = $("#dg-locate");
   if (input) input.value = "";
   buildMapScene(null, key);
   buildTicker(key);
   renderDashStats(key);
+  syncMapProfileLink(null);
 }
 function locateCandidates(){
   const set = new Set(Object.keys(CENTROIDS));
@@ -1683,7 +1798,7 @@ function wireLocate(){
     if (hit) focusCountry(hit[0], { setInput: false });
   });
 }
-function resetMapView(){ selectRegion("world"); }
+function resetMapView(){ selectRegion("all"); }
 function wireResetView(){
   const btn = $("#dg-reset");
   if (!btn || btn._wired) return;
@@ -1695,7 +1810,8 @@ function renderDdosTelemetry(){
   const el = $("#radar-ddos");
   if (!el) return;
   const dt = DATA.ddosTelemetry;
-  if (!dt || (!dt.l3.india.length && !dt.l7.india.length)){
+  const l3 = (dt && dt.l3 && dt.l3.global) || [], l7 = (dt && dt.l7 && dt.l7.global) || [];
+  if (!l3.length && !l7.length){
     el.innerHTML = '<div class="empty">No Cloudflare Radar data cached yet — set CF_RADAR_TOKEN (free Account &gt; Radar &gt; Read token) to enable real, measured DDoS attack-traffic telemetry alongside the claims above.</div>';
     return;
   }
@@ -1704,22 +1820,25 @@ function renderDdosTelemetry(){
     '<span class="radar-pct">' + r.pct.toFixed(1) + "%</span></div>";
   const colHtml = (list, empty) => list.length ? list.map(rowHtml).join("") : '<div class="empty">' + empty + "</div>";
   el.innerHTML =
-    '<div><div class="radar-col-hd">L3/L4 attack vectors targeting India (7d)</div>' + colHtml(dt.l3.india, "No L3/L4 attack traffic recorded.") + "</div>" +
-    '<div><div class="radar-col-hd">L7 HTTP methods targeting India (7d)</div>' + colHtml(dt.l7.india, "No L7 attack traffic recorded.") + "</div>";
+    '<div><div class="radar-col-hd">L3/L4 attack vectors, worldwide (7d)</div>' + colHtml(l3, "No L3/L4 attack traffic recorded.") + "</div>" +
+    '<div><div class="radar-col-hd">L7 HTTP methods, worldwide (7d)</div>' + colHtml(l7, "No L7 attack traffic recorded.") + "</div>" +
+    '<p class="cp-note" style="grid-column:1/-1">Per-country breakdowns are on each country\'s page (Geo Intel tab).</p>';
 }
 function renderDashStats(regionKey, focusCC){
   const pool = scopePool(regionKey || currentRegion, focusCC);
   const countries = new Set(pool.map(v => v.cc).filter(Boolean));
   const groups = new Set(pool.map(v => v.group));
-  const india = pool.filter(v => v.cc === "IN").length;
+  const byCc = {};
+  pool.forEach(v => { if (v.cc) byCc[v.cc] = (byCc[v.cc] || 0) + 1; });
+  const [topCc, topN] = Object.entries(byCc).sort((a, b) => b[1] - a[1])[0] || [null, 0];
   const cutoff = Date.now() - 7 * 86400000;
   const last7 = pool.filter(v => v.date && new Date(v.date).getTime() >= cutoff).length;
   const cveSet = new Set();
   allItems.forEach(i => { const m = (i.title + " " + (i.desc||"")).match(/CVE-\d{4}-\d{4,7}/gi); if (m) m.forEach(c => cveSet.add(c.toUpperCase())); });
-  const pct = pool.length ? Math.round(india / pool.length * 100) : 0;
+  const pct = pool.length ? Math.round(topN / pool.length * 100) : 0;
   $("#dg-stats").innerHTML = [
     ["Claims in scope", pool.length, last7 + " in the last 7 days", ""],
-    ["India", india, pct + "% of scope", "hot"],
+    ["Most targeted", topCc ? ccName(topCc) : "—", topCc ? topN + " claims · " + pct + "% of scope" : "no claims in scope", "hot"],
     ["Countries hit", countries.size, "victim countries", ""],
     ["Active groups", groups.size, "posting to leak sites", ""],
     ["CVEs tracked", cveSet.size, "mentioned in the feed", ""]
@@ -1742,11 +1861,13 @@ function buildDashboard(){
   renderBanner();
   renderKpis();
   document.querySelectorAll(".dg-rtab").forEach(t => t.classList.toggle("active", !focus && t.dataset.region === currentRegion));
+  const legend = $("#dg-legend-regions");
+  if (legend) legend.innerHTML = [...GEO_KEYS, "other"].map(k => '<span><i class="lg-rg" style="--rc:' + regionColor(k) + '"></i>' + esc(regionLabel(k)) + "</span>").join("");
 
   $("#dg-updated").textContent = rwVictims.length + " leak-site claims tracked · latest " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a");
   $("#dash-cov").textContent = "Coverage " + (dates[0] ? String(dates[0]).slice(0,10) : "n/a") + " → " + (dates.length ? String(dates[dates.length-1]).slice(0,10) : "n/a") + " · leak-site claims, not confirmed breaches · refreshed every 30 min server-side";
 
-  if (!mapTarget) setMapTarget(REGION_VIEW[currentRegion] || REGION_VIEW.world);
+  if (!mapTarget) setMapTarget(REGION_VIEW[currentRegion] || REGION_VIEW.all);
   buildMapScene(focus, currentRegion);
   buildTicker(currentRegion, focus);
   wireMap();
@@ -1757,7 +1878,7 @@ function buildDashboard(){
   if (activeTab === "map") startMapLoop();
   if (!tickClock._on){ tickClock._on = true; tickClock(); setInterval(tickClock, 1000); }
 
-  const { byGroup, bySector } = computeAgg("world");
+  const { byGroup, bySector } = computeAgg(currentRegion);
   const topGroups = Object.entries(byGroup).sort((a,b) => b[1]-a[1]).slice(0, 8);
   const topSectors = Object.entries(bySector).sort((a,b) => b[1]-a[1]).slice(0, 8);
 
@@ -1779,11 +1900,15 @@ function buildDashboard(){
   if (ctxT){
     const { buckets, capped } = buildTrendSeries();
     if (chartTrendInst) chartTrendInst.destroy();
-    const line = (label, key, hex) => ({ label, data: buckets.map(b => b[key]), borderColor: hex, backgroundColor: c => fade(c, hex),
-      fill: true, pointRadius: 0, pointHoverRadius: 3, borderWidth: 1.6, tension: 0.35 });
+    // One line per region; with a region picked, it's drawn on top and the others fade back.
+    const line = (label, key, hex) => {
+      const dim = geo !== "all" && key !== geo;
+      return { label, data: buckets.map(b => b[key]), borderColor: dim ? hex + "55" : hex, backgroundColor: c => dim ? "transparent" : fade(c, hex),
+        fill: !dim && geo !== "all", order: dim ? 1 : 0, pointRadius: 0, pointHoverRadius: 3, borderWidth: dim ? 1.1 : 1.8, tension: 0.35 };
+    };
     chartTrendInst = new Chart(ctxT, {
       type: "line",
-      data: { labels: buckets.map(b => b.key.slice(5)), datasets: [line("India", "india", "#ff5b3a"), line("APJ", "apj", "#ffb454"), line("Global", "global", "#7aa2d6")] },
+      data: { labels: buckets.map(b => b.key.slice(5)), datasets: GEO_KEYS.map(k => line(regionLabel(k), k, regionColor(k))) },
       options: {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
@@ -1796,6 +1921,8 @@ function buildDashboard(){
     });
     const note = ctxT.closest(".dg-achart").querySelector("h4");
     if (note) note.title = capped ? "Capped to the last 60 days for readability." : "";
+    const legend = $("#trend-legend");
+    if (legend) legend.innerHTML = GEO_KEYS.map(k => '<span class="sw" style="--rc:' + regionColor(k) + '">' + esc(regionLabel(k)) + "</span>").join("");
   }
 
   const hbar = (el, inst, rows, colorFor) => {
@@ -1884,17 +2011,9 @@ function wireActions(){
     localStorage.setItem("apjti.range", String(rangeDays));
     document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.t === c.dataset.t)));
     renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); buildDashboard();
+    if (activeTab === "country") renderCountry(); else renderCountryChips();
   }));
-  document.querySelectorAll("[data-af]").forEach(c => c.addEventListener("click", () => {
-    actorFilter = c.dataset.af;
-    localStorage.setItem("apjti.actorFilter", actorFilter);
-    renderActors();
-  }));
-  document.querySelectorAll("[data-rwf]").forEach(c => c.addEventListener("click", () => {
-    rwFilter = c.dataset.rwf;
-    localStorage.setItem("apjti.rwFilter", rwFilter);
-    renderRw();
-  }));
+  document.querySelectorAll("[data-geo]").forEach(c => c.addEventListener("click", () => setGeo(c.dataset.geo)));
   document.querySelectorAll("[data-tgf]").forEach(c => c.addEventListener("click", () => {
     tgFilter = c.dataset.tgf;
     localStorage.setItem("apjti.tgFilter", tgFilter);
@@ -1928,8 +2047,318 @@ function wireActions(){
   });
 }
 
+/* ---------------- Geo Intel page: everything the collection holds for one country ---------------- */
+// Pure client-side view over /api/data (claims by victim country, items/posts by the worker's cc
+// tags) plus two lazy extras: the APT sheet (/api/actors, groups whose Targets name the country) and
+// Cloudflare Radar's measured attack traffic for it (/api/radar?cc=, edge-cached per country).
+const radarCache = new Map(); // cc → { data } | { error } | "loading"
+function flagEmoji(cc){
+  return /^[A-Z]{2}$/.test(cc || "") ? String.fromCodePoint(...[...cc].map(c => 127397 + c.charCodeAt(0))) : "🌐";
+}
+function knownCountries(){
+  const set = new Set(Object.keys(CC_REGION));
+  rwVictims.forEach(v => v.cc && set.add(v.cc));
+  allItems.forEach(i => i.cc.forEach(c => set.add(c)));
+  return [...set].filter(cc => /^[A-Z]{2}$/.test(cc)).map(cc => [cc, ccName(cc)]).sort((a, b) => a[1].localeCompare(b[1]));
+}
+function resolveCountry(q, fuzzy){
+  q = String(q || "").trim().toLowerCase();
+  if (!q) return null;
+  const list = knownCountries();
+  const hit = list.find(([cc, name]) => cc.toLowerCase() === q || name.toLowerCase() === q) ||
+    (fuzzy && (list.find(([, name]) => name.toLowerCase().startsWith(q)) || (q.length > 2 && list.find(([, name]) => name.toLowerCase().includes(q)))));
+  return hit ? hit[0] : null;
+}
+function windowedClaims(){
+  const a = maxDate(rwVictims.map(v => v.date));
+  return a ? rwVictims.filter(v => inWindow(v.date, a.getTime())) : rwVictims;
+}
+function claimsByCountry(list){
+  const by = {};
+  list.forEach(v => { if (v.cc) by[v.cc] = (by[v.cc] || 0) + 1; });
+  return Object.entries(by).sort((a, b) => b[1] - a[1]);
+}
+function renderCountryChips(){
+  const el = $("#cp-chips");
+  if (!el) return;
+  const top = claimsByCountry(windowedClaims()).slice(0, 16);
+  el.innerHTML = top.length ? '<span class="apj-eyebrow" style="align-self:center;margin-right:4px">Most claimed · ' + rangeDays + " days</span>" + top.map(([cc, n]) =>
+    '<a class="cp-chip" href="#country/' + esc(cc) + '"' + (cc === cpCC ? ' aria-current="true"' : "") + '><i style="--rc:' + regionColor(ccRegion(cc)) + '"></i>' + esc(ccName(cc)) + "<b>" + n + "</b></a>").join("") : "";
+  const dl = $("#cp-countries");
+  if (dl && dl.options.length !== knownCountries().length) dl.innerHTML = knownCountries().map(([, name]) => '<option value="' + esc(name) + '">').join("");
+}
+function setCountry(cc, opts){
+  cc = String(cc || "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return;
+  cpCC = cc;
+  try { localStorage.setItem("apjti.country", cc); } catch (_){}
+  if (activeTab === "country") history.replaceState(null, "", "#country/" + cc);
+  const input = $("#cp-search");
+  if (input && document.activeElement !== input) input.value = "";
+  if (!(opts && opts.skipRender)){ renderCountryChips(); renderCountry(); }
+}
+function barsHtml(rows, empty){
+  if (!rows.length) return '<div class="bempty">' + esc(empty) + "</div>";
+  const max = Math.max(1, ...rows.map(r => r[1]));
+  return rows.map(([label, n]) => '<div class="cp-bar"><span>' + esc(label) + "</span><b>" + n + '</b><div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.round(n / max * 100) + '%"></div></div></div>').join("");
+}
+function countByKey(list, key){
+  const by = {};
+  list.forEach(x => { const k = x[key]; if (k) by[k] = (by[k] || 0) + 1; });
+  return Object.entries(by).sort((a, b) => b[1] - a[1]);
+}
+function renderCountry(){
+  const body = $("#cp-body");
+  if (!body) return;
+  if (!cpCC){
+    const top = claimsByCountry(windowedClaims())[0];
+    if (!top && !rwVictims.length && !allItems.length){ body.innerHTML = '<div class="empty">Loading…</div>'; return; }
+    cpCC = top ? top[0] : "US";
+    if (activeTab === "country") history.replaceState(null, "", "#country/" + cpCC);
+  }
+  const cc = cpCC, name = ccName(cc), region = ccRegion(cc);
+  $("#cp-title").textContent = flagEmoji(cc) + " " + name;
+  $("#cp-sub").textContent = regionLabel(region) + " · " + cc + " · last " + rangeDays + " days";
+  const mapLink = $("#cp-map");
+  if (mapLink) mapLink.href = "#map";
+  document.querySelectorAll("#cp-chips .cp-chip").forEach(a => a.setAttribute("aria-current", String(a.getAttribute("href") === "#country/" + cc)));
+
+  const allClaims = rwVictims.filter(v => v.cc === cc);
+  const claims = windowedClaims().filter(v => v.cc === cc);
+  const itemAnchor = maxDate(allItems.map(i => i.date));
+  const news = allItems.filter(i => i.cc.includes(cc) && (!itemAnchor || inWindow(i.date, itemAnchor.getTime())))
+    .sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+  const socialAnchor = maxDate([...telegramItems, ...rwNewsItems].map(i => i.date));
+  const social = [...telegramItems, ...rwNewsItems].filter(i => i.cc.includes(cc) && (!socialAnchor || inWindow(i.date, socialAnchor.getTime())))
+    .sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+  const groups = countByKey(claims, "group"), sectors = countByKey(claims, "sector");
+  const last = allClaims.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0];
+
+  // Headline numbers sit on the globe hero as glass panels.
+  const tile = (label, value, small, sub, cls) => '<div class="cp-stat' + (cls ? " " + cls : "") + '"><div class="l">' + esc(label) + '</div><div class="v">' + esc(String(value)) +
+    (small ? "<small>" + esc(small) + "</small>" : "") + '</div><div class="s" title="' + esc(sub) + '">' + esc(sub) + "</div></div>";
+  $("#cp-stats").innerHTML =
+    tile("Ransomware claims", claims.length, allClaims.length > claims.length ? "of " + allClaims.length + " stored" : "", "Leak-site claims · unconfirmed") +
+    tile("Active groups", groups.length, "", groups[0] ? "Top: " + groups[0][0] : "None in this window") +
+    tile("News mentions", news.length, social.length ? "+" + social.length + " social" : "", "Feed items naming " + name) +
+    tile("Latest claim", last ? String(last.date || "").slice(5, 10) || "—" : "—", last ? String(last.date || "").slice(0, 4) : "", last ? last.group + " ▸ " + last.victim : "None stored");
+
+  const claimRows = claims.slice(0, 40).map(v => "<tr>" +
+    '<td data-label="Organization">' + victimNameHtml(v.victim) + "</td>" +
+    '<td data-label="Sector" class="text-muted">' + esc(v.sector || "—") + "</td>" +
+    '<td data-label="Group">' + esc(v.group) + "</td>" +
+    '<td data-label="Claimed" class="text-muted">' + (v.date ? esc(String(v.date).slice(0, 10)) : "—") + "</td></tr>").join("");
+  const claimsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Ransomware claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· ransomware.live leak sites, newest first' + (claims.length > 40 ? " · 40 of " + claims.length : "") + "</span></div>" +
+    (claims.length ? '<div class="table-wrap"><table class="table"><thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Claimed</th></tr></thead><tbody>' + claimRows + "</tbody></table></div>"
+      : '<div class="bempty">No claims against ' + esc(name) + " in the last " + rangeDays + " days" + (allClaims.length ? " (" + allClaims.length + " older ones stored — widen the window)." : ".") + "</div>") + "</div>";
+
+  const newsList = (list, max, withChannel) => list.length ? '<ul class="cp-list">' + list.slice(0, max).map(i =>
+    '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a>" +
+    '<div class="card-meta">' + esc(withChannel && i.channel ? i.channel : i.src) + (i.date ? " · " + fmtDate(i.date) : "") +
+      (i.claim ? ' · <span class="tag tag-accent">Actor claim</span>' : "") + (i.lens ? ' · <span class="tag tag-neutral">DDoS · AppSec</span>' : "") + "</div></li>").join("") + "</ul>" : "";
+  const newsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">In the news <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· items naming ' + esc(name) + ", its cities or country-specific terms</span></div>" +
+    (newsList(news, 14) || '<div class="bempty">No feed items mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") + "</div>";
+  const socialCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Telegram &amp; community <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· unmoderated — claims, not confirmed</span></div>' +
+    (newsList(social, 10, true) || '<div class="bempty">No Telegram or Mastodon posts mention ' + esc(name) + " in the last " + rangeDays + " days.</div>") + "</div>";
+
+  // Curated profiles that name this country, plus "targets everywhere" ones actually claiming here.
+  const claimGroups = new Set(allClaims.map(v => groupKey(v.group)));
+  const curated = mergedActors().filter(a => (a.geo || []).includes(cc) || ((a.geo || []).includes("global") && claimGroups.has(groupKey(a.name))));
+  const sheet = (aptGroups || []).filter(g => g.cc.includes(cc)).sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
+  const actorsCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Threat actors</div>' +
+    (curated.length ? '<ul class="cp-list">' + curated.map(a => "<li><b>" + esc(a.name) + '</b> <span class="text-muted">· ' + esc(a.motive) + " · " + esc(a.origin) + "</span>" +
+      '<div class="card-meta">' + esc(a.targets) + "</div></li>").join("") + "</ul>" : '<div class="bempty">No curated profile targets ' + esc(name) + ".</div>") +
+    '<div class="card-kicker" style="margin-top:var(--space-5)">Community sheet · groups whose targets name ' + esc(name) + "</div>" +
+    (aptGroups === null ? '<div class="bempty">Loading the APT groups sheet…</div>'
+      : sheet.length ? '<ul class="cp-list">' + sheet.slice(0, 15).map(g => "<li><b>" + esc(g.label || g.name) + '</b> <span class="text-muted">· ' + esc(g.tab) + (g.mitre ? " · " : "") + "</span>" + (g.mitre ? aptMitreLink(g.mitre) : "") +
+          (g.aliases && g.aliases.length ? '<div class="card-meta">' + esc(aptAliasText(g, 4)) + "</div>" : "") + "</li>").join("") + "</ul>" +
+          (sheet.length > 15 ? '<p class="cp-note">+' + (sheet.length - 15) + ' more — search the directory on the <a href="#actors">Actors</a> tab.</p>' : "")
+        : '<div class="bempty">No sheet group lists ' + esc(name) + " among its targets.</div>") +
+    '<p class="cp-note">Attribution is the sources\' call, not this app\'s — see each profile\'s confidence note on the Actors tab.</p></div>';
+
+  const radarCard = '<div class="card elev-sm cp-card"><div class="card-kicker">Measured DDoS traffic <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· Cloudflare Radar, targeting ' + esc(name) + ', 7 days</span></div><div id="cp-radar">' + radarHtml(cc) + "</div></div>";
+
+  body.innerHTML = '<div class="cp-grid"><div class="cp-col">' + claimsCard + newsCard + socialCard + "</div>" +
+    '<div class="cp-col"><div class="card elev-sm cp-card"><div class="card-kicker">Most active groups</div>' + barsHtml(groups.slice(0, 8), "No claims in this window.") + "</div>" +
+    '<div class="card elev-sm cp-card"><div class="card-kicker">Sectors hit</div>' + barsHtml(sectors.slice(0, 8), claims.length ? "No sector recorded for these claims." : "No claims in this window.") + "</div>" +
+    radarCard + actorsCard + "</div></div>";
+  loadRadar(cc);
+  updateGlobe(cc);
+}
+
+/* Geo Intel hero globe — globe.gl (three.js), loaded on first visit to the tab since it's ~1.9MB.
+   Night-side Earth texture from three-globe's examples, badges = claims per victim country in the
+   window (CSS2D elements), the selected country as a large highlighted badge with a detail card.
+   Falls back to no globe (panels still work) if WebGL or the CDN isn't available. */
+const GLOBE_JS = "https://cdn.jsdelivr.net/npm/globe.gl@2.46.2/dist/globe.gl.min.js";
+const GLOBE_SRI = "sha384-1uolMBZ25k3zJcNwCLEv49+L+m2dZudqAzsoSAJfQTzDCSBxJzrMuZ2dkp/5JKiT";
+const GLOBE_TEXTURE = "https://cdn.jsdelivr.net/npm/three-globe@2.45.2/example/img/earth-night.jpg";
+const GLOBE_BADGES = 22;
+let cpGlobe = null, globeState = "idle", globeCC = null;
+function loadScript(src, integrity){
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src; el.async = true; el.crossOrigin = "anonymous";
+    if (integrity) el.integrity = integrity;
+    el.onload = resolve; el.onerror = () => reject(new Error("could not load " + src));
+    document.head.appendChild(el);
+  });
+}
+function webglOk(){
+  try { const c = document.createElement("canvas"); return !!(window.WebGLRenderingContext && (c.getContext("webgl2") || c.getContext("webgl"))); } catch (_){ return false; }
+}
+async function initGlobe(){
+  if (globeState !== "idle") return;
+  const el = $("#cp-globe");
+  if (!el || !webglOk()){ globeState = "failed"; return; }
+  globeState = "loading";
+  try {
+    if (typeof Globe === "undefined") await loadScript(GLOBE_JS, GLOBE_SRI);
+    loadAtlas(); // country lookup for globe clicks + centroids for countries missing from CENTROIDS
+    const g = new Globe(el, { animateIn: !REDUCED_MOTION })
+      .backgroundColor("rgba(0,0,0,0)")
+      .globeImageUrl(GLOBE_TEXTURE)
+      .atmosphereColor("#4a8cff")
+      .atmosphereAltitude(0.2)
+      .width(el.clientWidth).height(el.clientHeight)
+      .htmlLat("lat").htmlLng("lng").htmlAltitude(0.012)
+      .htmlElement(d => d.el)
+      .htmlTransitionDuration(0)
+      .onGlobeClick(({ lat, lng }) => {
+        const id = maskAt(lat, lng);
+        const cc = id && id !== 65535 ? maskCountries[id - 1].cc : null;
+        if (cc) setCountry(cc);
+      });
+    const ctl = g.controls();
+    ctl.enableZoom = false; // page scroll must keep working over the hero
+    ctl.autoRotate = false;
+    if (window.ResizeObserver) new ResizeObserver(() => { if (el.clientWidth) g.width(el.clientWidth).height(el.clientHeight); }).observe(el);
+    cpGlobe = g;
+    globeState = "ready";
+    globeCC = null;
+    updateGlobe(cpCC);
+  } catch (e){
+    globeState = "failed";
+    console.warn("Geo Intel globe unavailable", e);
+  }
+}
+function updateGlobe(cc){
+  if (globeState === "idle"){ initGlobe(); return; }
+  if (!cpGlobe || !cc) return;
+  const counts = claimsByCountry(windowedClaims());
+  const top = counts.slice(0, GLOBE_BADGES);
+  if (!top.some(([c]) => c === cc)) top.push([cc, (counts.find(([c]) => c === cc) || [cc, 0])[1]]);
+  const sel = counts.find(([c]) => c === cc);
+  const claimsHere = windowedClaims().filter(v => v.cc === cc);
+  const topGroup = countByKey(claimsHere, "group")[0];
+  const data = top.map(([c, n]) => {
+    const p = posOf(c);
+    if (!p) return null;
+    const wrap = document.createElement("div");
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "gb-badge"; b.textContent = n;
+    b.style.setProperty("--rc", regionColor(ccRegion(c)));
+    b.title = ccName(c) + " · " + n + " claims, last " + rangeDays + " days";
+    b.addEventListener("click", e => { e.stopPropagation(); setCountry(c); });
+    if (c === cc){
+      wrap.className = "gb-sel";
+      const card = document.createElement("div");
+      card.className = "gb-card";
+      card.innerHTML = '<span class="k">' + esc(regionLabel(ccRegion(c))) + "</span><b>" + flagEmoji(c) + " " + esc(ccName(c)) + "</b>" +
+        (sel ? sel[1] + " leak-site claims in " + rangeDays + " days" + (topGroup ? "<br>Most active: " + esc(topGroup[0]) + " (" + topGroup[1] + ")" : "") : "No claims in this window");
+      wrap.appendChild(card);
+    }
+    wrap.appendChild(b);
+    return { lat: p[0], lng: p[1], el: wrap };
+  }).filter(Boolean);
+  cpGlobe.htmlElementsData(data);
+  if (cc !== globeCC){
+    globeCC = cc;
+    const p = posOf(cc);
+    // Centre the country on the disc; latitude is eased toward the equator so polar countries
+    // don't tip the globe over.
+    if (p) cpGlobe.pointOfView({ lat: p[0] * 0.7, lng: p[1], altitude: 2.1 }, REDUCED_MOTION ? 0 : 1400);
+  }
+}
+function radarHtml(cc){
+  const r = radarCache.get(cc);
+  if (!r || r === "loading") return '<div class="bempty">Loading…</div>';
+  if (r.error) return '<div class="bempty">' + esc(r.error) + "</div>";
+  const rows = list => list.length ? list.map(x => '<div class="cp-bar"><span>' + esc(x.label) + "</span><b>" + x.pct.toFixed(1) + '%</b><div class="apj-barcell"><div class="apj-barfill" style="width:' + Math.min(100, x.pct) + '%"></div></div></div>').join("") : '<div class="bempty">None recorded.</div>';
+  return '<div class="apj-eyebrow" style="margin-bottom:6px">L3/L4 attack vectors</div>' + rows(r.data.l3) +
+    '<div class="apj-eyebrow" style="margin:12px 0 6px">L7 HTTP methods</div>' + rows(r.data.l7) +
+    '<p class="cp-note">Share of attack traffic by type — not attack counts, and not confirmation of any claim above.</p>';
+}
+async function loadRadar(cc){
+  if (radarCache.has(cc)) return;
+  radarCache.set(cc, "loading");
+  try {
+    const r = await fetch("/api/radar?cc=" + encodeURIComponent(cc));
+    const d = await r.json();
+    radarCache.set(cc, d.error ? { error: d.error } : { data: d });
+  } catch (e){
+    radarCache.set(cc, { error: "Radar lookup failed (" + e.message + ")." });
+  }
+  const el = $("#cp-radar");
+  if (el && cpCC === cc) el.innerHTML = radarHtml(cc);
+}
+function wireCountry(){
+  const form = $("#cp-form"), input = $("#cp-search");
+  if (form) form.addEventListener("submit", e => {
+    e.preventDefault();
+    const cc = resolveCountry(input.value, true);
+    if (cc){ setCountry(cc); input.value = ""; input.blur(); }
+  });
+  // Picking from the datalist fills the exact name — switch right away, but not on every keystroke.
+  if (input) input.addEventListener("input", () => {
+    const cc = resolveCountry(input.value, false);
+    if (cc && ccName(cc).toLowerCase() === input.value.trim().toLowerCase()){ setCountry(cc); input.value = ""; }
+  });
+  const mapLink = $("#cp-map");
+  if (mapLink) mapLink.addEventListener("click", e => {
+    if (!cpCC) return;
+    e.preventDefault();
+    showTab("map");
+    focusCountry(cpCC);
+  });
+  const profile = $("#dg-profile");
+  if (profile) profile.addEventListener("click", e => {
+    const cc = parseHash(profile.getAttribute("href")).cc;
+    if (!cc) return;
+    e.preventDefault();
+    setCountry(cc, { skipRender: true });
+    showTab("country");
+    window.scrollTo(0, 0);
+  });
+}
+
+/* ---------------- Region filter (header segment + map region tabs) ---------------- */
+function syncGeoUi(){
+  document.querySelectorAll("[data-geo]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.geo === geo)));
+  const eyebrow = $("#scope-eyebrow");
+  if (eyebrow) eyebrow.textContent = geo === "all" ? "Global · all regions" : "Region · " + geoLabel();
+  const bs = $("#brief-scope");
+  if (bs) bs.textContent = (geo === "all" ? "Global" : geoLabel() + " first, then everywhere else") + " · assessed from collected data, not confirmed";
+}
+function setGeo(key){
+  geo = normGeo(key);
+  currentRegion = geo;
+  try { localStorage.setItem("apjti.geo", geo); } catch (_){}
+  syncGeoUi();
+  mapScene.focus = null;
+  if (mapTarget) setMapTarget(REGION_VIEW[geo] || REGION_VIEW.all);
+  const input = $("#dg-locate");
+  if (input) input.value = "";
+  syncMapProfileLink(null);
+  renderActors();
+  renderApt();
+  renderAll();
+}
+
 /* ---------------- Init ---------------- */
 async function renderAll(){
+  renderCountryChips();
+  if (activeTab === "country") renderCountry();
   renderRw();
   renderRansomwareNews();
   renderTelegram();
@@ -1944,9 +2373,8 @@ async function renderAll(){
 async function init(){
   $("#today").textContent = new Date().toLocaleDateString(undefined, { weekday:"long", year:"numeric", month:"long", day:"numeric" });
   document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(parseInt(x.dataset.t, 10) === rangeDays)));
-  document.querySelectorAll("[data-rwf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.rwf === rwFilter)));
   document.querySelectorAll("[data-tgf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.tgf === tgFilter)));
-  document.querySelectorAll("[data-af]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.af === actorFilter)));
+  syncGeoUi();
   document.querySelectorAll("[data-vf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.vf === vulnFilter)));
   document.querySelectorAll("[data-iocf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.iocf === iocFilter)));
   renderActors();
@@ -1956,8 +2384,11 @@ async function init(){
   wireNavToggle();
   wireThemeToggle();
   wireTabs();
-  const startTab = TAB_IDS.includes(location.hash.slice(1)) ? location.hash.slice(1) : (localStorage.getItem("apjti.tab") || "brief");
-  showTab(startTab, { skipHash: true });
+  wireCountry();
+  const h = parseHash(location.hash);
+  if (h.cc) cpCC = h.cc;
+  const startTab = TAB_IDS.includes(h.id) ? h.id : (localStorage.getItem("apjti.tab") || "brief");
+  showTab(startTab, { skipHash: !(h.id === "country" && !h.cc) });
 
   try {
     await loadData();

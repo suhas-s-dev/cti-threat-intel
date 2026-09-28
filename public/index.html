@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Threat Intelligence</title>
-<meta name="description" content="Open-source APJ/India-priority threat intelligence dashboard: live feed, ransomware tracker, actor profiles, and a DarkGrid-style ransomware attack map.">
+<meta name="description" content="Open-source global threat intelligence dashboard: region filters, per-country profiles, ransomware tracker, actor profiles, and a DarkGrid-style ransomware attack map.">
 <script>
   // Runs before first paint so there's no light→dark flash. Dark unless the user picked light with the
   // nav toggle (apjti.theme). prefers-color-scheme is deliberately not consulted: "light" is the OS
@@ -30,6 +30,7 @@
   <span class="nav-brand"><span class="nav-logo" aria-hidden="true">CTI</span>Threat Intel</span>
   <div class="nav-links" id="nav-links">
     <a href="#brief">Brief</a>
+    <a href="#country">Geo Intel</a>
     <a href="#ransomware">Ransomware</a>
     <a href="#vulnerabilities">Vulnerabilities</a>
     <a href="#telegram">Telegram</a>
@@ -58,9 +59,22 @@
 <header class="section" style="padding-top:var(--space-5); padding-bottom:var(--space-4)">
   <div class="page-head">
     <div data-only-tabs="brief ransomware vulnerabilities telegram actors iocs">
-      <div class="apj-num">India-first · APJ · Global</div>
+      <div class="apj-num" id="scope-eyebrow">Global</div>
       <h1 data-only-tabs="brief">Signals worth triaging</h1>
       <p data-only-tabs="brief">Open-source collection · DDoS / AppSec lens · MITRE ATT&amp;CK mapped. Leak-site and social claims are shown as claims, not confirmed incidents.</p>
+    </div>
+    <div class="head-ctls">
+    <div class="window-ctl" data-only-tabs="brief ransomware telegram actors">
+      <span class="apj-eyebrow" id="geo-label">Region</span>
+      <div class="apj-seg geo-seg" role="radiogroup" aria-labelledby="geo-label">
+        <button type="button" data-geo="all" aria-pressed="false">All</button>
+        <button type="button" data-geo="apj" aria-pressed="false">APJ</button>
+        <button type="button" data-geo="eu" aria-pressed="false">Europe</button>
+        <button type="button" data-geo="na" aria-pressed="false">N. America</button>
+        <button type="button" data-geo="sa" aria-pressed="false">S. America</button>
+        <button type="button" data-geo="me" aria-pressed="false">Middle East</button>
+        <button type="button" data-geo="af" aria-pressed="false">Africa</button>
+      </div>
     </div>
     <div class="window-ctl">
       <span class="apj-eyebrow" id="window-label">Window · ransomware, Telegram, snapshot, trend</span>
@@ -71,6 +85,7 @@
         <button type="button" data-t="180" aria-pressed="false">6 months</button>
         <button type="button" data-t="365" aria-pressed="false">1 year</button>
       </div>
+    </div>
     </div>
   </div>
   <div class="kpis" id="kpis" data-only-tabs="brief ransomware vulnerabilities telegram actors iocs" aria-label="Key metrics"></div>
@@ -87,7 +102,7 @@
       <span class="apj-num">01 / Brief</span>
       <h2 style="margin:0">Daily brief</h2>
     </div>
-    <span class="apj-eyebrow">India first, then global · assessed from collected data, not confirmed</span>
+    <span class="apj-eyebrow" id="brief-scope">Assessed from collected data, not confirmed</span>
   </div>
   <div class="grid-2-1">
     <div class="card elev-md" style="padding:var(--space-6)">
@@ -97,7 +112,7 @@
     <div style="display:flex; flex-direction:column; gap:var(--space-4)">
       <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Signal snapshot</div>
-        <div id="snapshot"></div>
+        <div id="snapshot" class="bempty">Loading…</div>
       </div>
       <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Critical vulnerabilities <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· CISA KEV, added this week</span></div>
@@ -111,26 +126,42 @@
   </div>
 </section>
 
-<!-- 02 RANSOMWARE -->
+<!-- 02 COUNTRIES -->
+<section id="country" class="section" hidden>
+  <div class="cp-hero">
+    <div class="cp-globe" id="cp-globe" role="img" aria-label="Globe of leak-site claims by victim country; the selected country is highlighted"></div>
+    <div class="cp-hero-info">
+      <span class="apj-num cp-num">02 / Geo Intel</span>
+      <h2 class="cp-title" id="cp-title">Country profile</h2>
+      <div class="cp-sub" id="cp-sub"></div>
+      <form id="cp-form" class="cp-form" autocomplete="off">
+        <input id="cp-search" class="cp-input" type="search" list="cp-countries" placeholder="Any country — India, Germany, Brazil…" aria-label="Pick a country">
+        <datalist id="cp-countries"></datalist>
+      </form>
+      <div class="cp-stats" id="cp-stats"></div>
+      <a id="cp-map" class="cp-maplink" href="#map">Open on the flat claim map →</a>
+    </div>
+    <div class="cp-hero-note">Badges: leak-site claims per victim country, selected window · drag to rotate · click a badge or a country</div>
+  </div>
+  <div class="cp-chips" id="cp-chips" aria-label="Most-claimed countries in the time window"></div>
+  <div id="cp-body"><div class="empty">Loading…</div></div>
+</section>
+
+<!-- 03 RANSOMWARE -->
 <section id="ransomware" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">02 / Ransomware</span>
+      <span class="apj-num">03 / Ransomware</span>
       <h2 style="margin:0">Ransomware victims</h2>
     </div>
     <div class="section-controls">
-      <div class="apj-seg" role="radiogroup" aria-label="Ransomware filter">
-        <button type="button" data-rwf="apj" aria-pressed="false">APJ</button>
-        <button type="button" data-rwf="global" aria-pressed="false">Global</button>
-        <button type="button" data-rwf="all" aria-pressed="false">All</button>
-      </div>
       <select id="sector-filter" class="input" style="max-width:190px"><option value="all">All industries</option></select>
     </div>
   </div>
   <div class="card table-wrap" style="padding:0">
     
     <table class="table">
-      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Region</th><th>Claimed</th><th>Status</th></tr></thead>
+      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Country</th><th>Claimed</th><th>Status</th></tr></thead>
       <tbody id="rw"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
     </table>
   </div>
@@ -150,7 +181,7 @@
 <section id="vulnerabilities" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">03 / Vulnerabilities</span>
+      <span class="apj-num">04 / Vulnerabilities</span>
       <h2 style="margin:0">Critical vulnerabilities</h2>
     </div>
     <div class="section-controls">
@@ -190,7 +221,7 @@
 <section id="telegram" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">04 / Telegram</span>
+      <span class="apj-num">05 / Telegram</span>
       <h2 style="margin:0">Telegram bot feed</h2>
     </div>
     <div class="section-controls">
@@ -214,17 +245,12 @@
 <section id="actors" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">05 / Actors</span>
+      <span class="apj-num">06 / Actors</span>
       <h2 style="margin:0">Threat actor tracker</h2>
-      <span class="apj-eyebrow">sorted by latest observed activity</span>
-    </div>
-    <div class="apj-seg" role="radiogroup" aria-label="Actor filter">
-      <button type="button" data-af="all" aria-pressed="false">All</button>
-      <button type="button" data-af="apj" aria-pressed="false">APJ / India</button>
-      <button type="button" data-af="global" aria-pressed="false">Global</button>
+      <span class="apj-eyebrow">sorted by latest observed activity · follows the region filter</span>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Curated baseline profiles — click a card to expand. Maintained by hand, not auto-refreshed.</p>
+  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Curated baseline profiles — click a card to expand. Maintained by hand, not auto-refreshed. A region shows the actors known to target it, plus those that target everywhere.</p>
   <div class="actor-grid" id="actors-list"></div>
 
   <div class="section-head" style="margin-top:var(--space-8)">
@@ -234,15 +260,11 @@
       <span class="apj-eyebrow" id="apt-meta">loading…</span>
     </div>
     <div class="section-controls">
-      <div class="apj-seg" role="radiogroup" aria-label="Directory filter">
-        <button type="button" data-aptf="apj" aria-pressed="false">India / APJ</button>
-        <button type="button" data-aptf="all" aria-pressed="false">All groups</button>
-      </div>
       <select id="apt-tab-filter" class="input" style="max-width:170px" aria-label="Country tab"><option value="all">All countries</option></select>
       <input id="apt-search" class="input search-input" type="search" placeholder="Any name or alias — APT36, Fancy Bear, Mint Sandstorm…" aria-label="Search groups and aliases">
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Maps each vendor's name for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0). Checked daily for edits. The sheet itself warns that attribution is complex and its mappings are best-effort — and it has had few additions since 2024, so treat it as an alias reference, not current activity. Click a row for operations, malware, and sources.</p>
+  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Maps each vendor's name for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0). Checked daily for edits. With a region picked, lists groups whose <em>Targets</em> name a country in it (search looks across all groups). The sheet itself warns that attribution is complex and its mappings are best-effort — and it has had few additions since 2024, so treat it as an alias reference, not current activity. Click a row for operations, malware, and sources.</p>
   <div class="card elev-sm" style="padding:var(--space-5);margin-bottom:var(--space-4)">
     <div class="card-kicker">Recent sheet changes</div>
     <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
@@ -276,7 +298,7 @@
   <div class="darkgrid">
     <header class="dg-top">
       <div class="dg-top-left">
-        <span class="dg-num">06 / Map</span>
+        <span class="dg-num">07 / Map</span>
         <h2 class="dg-h"><span class="pulse-dot"></span>DarkGrid <em>ransomware claim map</em></h2>
         <div class="dg-sub" id="dg-updated">loading…</div>
       </div>
@@ -291,16 +313,17 @@
 
     <div class="dg-toolbar">
       <div class="dg-regions" id="dg-regions" role="tablist" aria-label="Map region">
-        <button type="button" class="dg-rtab active" data-region="world">World</button>
-        <button type="button" class="dg-rtab" data-region="in">India</button>
-        <button type="button" class="dg-rtab" data-region="apac">APAC</button>
+        <button type="button" class="dg-rtab active" data-region="all">World</button>
+        <button type="button" class="dg-rtab" data-region="apj">APJ</button>
+        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
         <button type="button" class="dg-rtab" data-region="na">N. America</button>
         <button type="button" class="dg-rtab" data-region="sa">S. America</button>
-        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
         <button type="button" class="dg-rtab" data-region="me">Middle East</button>
+        <button type="button" class="dg-rtab" data-region="af">Africa</button>
       </div>
       <div class="dg-tools">
         <input id="dg-locate" class="dg-locate" type="text" placeholder="Locate country…" autocomplete="off" aria-label="Locate country">
+        <a id="dg-profile" class="dg-reset" href="#country" hidden>Country profile →</a>
         <button type="button" id="dg-reset" class="dg-reset" title="Reset to the default world view">Reset view</button>
       </div>
     </div>
@@ -312,9 +335,7 @@
         <div class="dg-map-corner tl" id="dg-scope">SCOPE · WORLD</div>
         <div class="dg-map-corner tr" id="dg-coords">LAT —  LON —</div>
         <div class="dg-legend">
-          <span><i class="lg-in"></i>India</span>
-          <span><i class="lg-apj"></i>APJ</span>
-          <span><i class="lg-other"></i>Other</span>
+          <span id="dg-legend-regions" class="dg-legend-regions"></span>
           <span class="lg-heat"><b></b>claim density</span>
           <span class="dg-legend-note">Arcs link countries hit by the same group. They don't show where an attack came from.</span>
         </div>
@@ -332,13 +353,13 @@
         <div class="dg-panel-hd"><span><span class="rec-dot"></span>Live claim feed</span><span class="dg-panel-meta" id="dg-feed-count">0</span></div>
         <div class="ticker"><div class="ticker-track" id="dg-ticker"></div></div>
       </div>
-      <div class="dg-achart dg-trend"><h4>Signal volume <span><span class="sw sw-in">India</span><span class="sw sw-apj">APJ</span><span class="sw sw-gl">Global</span></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
+      <div class="dg-achart dg-trend"><h4>Signal volume by region <span id="trend-legend"></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
     </div>
 
     <div class="dg-analytics">
-      <div class="dg-achart"><h4>Top groups <span>leak-site claims</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
-      <div class="dg-achart"><h4>Top sectors <span>leak-site claims</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
-      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span>Cloudflare Radar · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
+      <div class="dg-achart"><h4>Top groups <span>leak-site claims · selected region</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
+      <div class="dg-achart"><h4>Top sectors <span>leak-site claims · selected region</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
+      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span>Cloudflare Radar · worldwide · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
     </div>
     <div class="dg-note" id="dash-cov"></div>
   </div>
@@ -348,7 +369,7 @@
 <section id="iocs" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">07 / IOCs</span>
+      <span class="apj-num">08 / IOCs</span>
       <h2 style="margin:0">Indicators of compromise</h2>
     </div>
     <div class="section-controls">
