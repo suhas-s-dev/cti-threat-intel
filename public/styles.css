@@ -492,6 +492,7 @@ footer.site-foot { border-top: 1px solid var(--color-divider); padding: var(--sp
 .foot-grid { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-6); font-size: 12.5px; line-height: 1.7; color: var(--color-neutral-700); }
 .foot-grid strong { color: var(--color-text); }
 .foot-right { text-align: right; }
+.foot-credit { margin-top: var(--space-1); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-neutral-600); }
 @media (max-width: 720px) { .foot-grid { grid-template-columns: 1fr; } .foot-right { text-align: left; margin-top: var(--space-3); } }
 
 /* ── DarkGrid — dark ops-room map page. When the Map tab is active, body.map-mode (set by showTab())
