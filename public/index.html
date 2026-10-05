@@ -103,13 +103,21 @@
     </div>
     <span class="apj-eyebrow" id="brief-scope">Assessed from collected data, not confirmed</span>
   </div>
-  <div class="card pulse" id="pulse" aria-labelledby="pulse-h">
-    <div class="pulse-head">
-      <div><h3 id="pulse-h" style="margin:0">Threat pulse</h3><span class="rw-panel-sub" id="pulse-sub"></span></div>
-      <span class="rw-panel-sub">Each lane has its own scale. Hatched days are outside what this app still retains.</span>
+  <div class="card flows" id="flows" aria-labelledby="flows-h">
+    <div class="flows-head">
+      <div><h3 id="flows-h" style="margin:0">DDoS attack flows</h3><span class="rw-panel-sub" id="flows-sub"></span></div>
+      <div class="apj-seg" role="radiogroup" aria-label="Map view">
+        <button type="button" data-flowmode="flows" aria-pressed="true">HTTP flows (L7)</button>
+        <button type="button" data-flowmode="targets" aria-pressed="false">Targets (L3/L4)</button>
+        <button type="button" data-flowmode="origins" aria-pressed="false">Sources (L3/L4)</button>
+      </div>
     </div>
-    <div class="pulse-lanes" id="pulse-lanes"><div class="empty">Loading…</div></div>
-    <div class="pulse-axis" id="pulse-axis"></div>
+    <div class="flows-body">
+      <div class="flows-map" id="flows-map"><div class="empty">Loading…</div></div>
+      <div class="flows-side"><div class="card-kicker" id="flows-list-h"></div><ol class="flows-list" id="flows-list"></ol></div>
+    </div>
+    <div class="flows-stats" id="flows-stats"></div>
+    <p class="rw-panel-note" id="flows-note"></p>
   </div>
   <div class="grid-2-1">
     <div class="card elev-md" style="padding:var(--space-6)">

@@ -1019,52 +1019,37 @@ body.rw-drawer-open { overflow: hidden; }
 @media (max-width: 900px) { .ac-grid, .ac-trend-panels { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .ac-filters .input { max-width: none; width: 100%; flex: 1 1 100%; } .ac-facts { grid-template-columns: 1fr; } }
 
-/* ── Brief: threat pulse (renderPulse) ───────────────────────────────────────────────────── */
-.pulse { padding: var(--space-5) var(--space-6); margin-bottom: var(--space-5); gap: var(--space-3); }
-.pulse-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px var(--space-4); }
-.pulse-head h3 { font-size: 17px; }
-.pulse-lanes { display: flex; flex-direction: column; }
-.pulse-lane { display: grid; grid-template-columns: 13.5em minmax(0, 1fr) 12em; align-items: end; gap: var(--space-4); padding: var(--space-3) 0; border-bottom: 1px solid var(--color-divider); }
-.pulse-lane:last-child { border-bottom: 0; }
-.pulse-label { display: flex; flex-direction: column; gap: 2px; text-align: left; font: inherit; color: var(--color-text); background: none; border: 0; padding: 0 0 2px; cursor: pointer; align-self: center; }
-.pulse-label b { font-size: 14px; }
-.pulse-label span { font-size: 12px; color: var(--color-neutral-700); line-height: 1.35; }
-.pulse-label:hover b { color: var(--color-accent-700); text-decoration: underline; text-underline-offset: 3px; }
-.pulse-plot { position: relative; height: 48px; padding-top: 4px; }
-.pulse-plot svg { display: block; width: 100%; height: 44px; overflow: visible; }
-.pulse-bar { fill: var(--color-accent); opacity: .8; }
-.pulse-bar.hot { fill: var(--lvl-red); opacity: .75; }
-.pulse-bar.claim { fill: var(--color-accent-800); opacity: 1; }
-.pulse-zero { fill: var(--color-divider-strong); }
-.pulse-hit { fill: transparent; }
-.pulse-b:hover .pulse-bar { opacity: 1; }
-.pulse-click { cursor: pointer; }
-.pulse-gap { stroke: none; }
-.pulse-hatch { fill: var(--color-divider-strong); opacity: .55; }
-.pulse-spike { position: absolute; top: -14px; transform: translateX(-50%); white-space: nowrap; pointer-events: none; z-index: 1; }
-.pulse-spike span { font-size: 11px; font-family: var(--font-mono); color: var(--color-neutral-800); background: var(--color-panel); padding: 0 4px; border-radius: 4px; }
-.pulse-spike-start { transform: translateX(-6px); } .pulse-spike-end { transform: translateX(calc(-100% + 6px)); }
-.pulse-spike-note { display: none; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-800); margin-top: 2px; }
-.pulse-lane:first-child .pulse-plot { margin-top: 10px; }
-.pulse-total { display: flex; flex-direction: column; align-items: flex-end; text-align: right; align-self: center; }
-.pulse-total b { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
-.pulse-total > span { font-size: 12px; color: var(--color-neutral-700); }
-.pulse-delta { margin-top: 3px; font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-800); }
-.pulse-axis { display: grid; grid-template-columns: 13.5em minmax(0, 1fr) 12em; gap: var(--space-4); }
-.pulse-axis-inner { grid-column: 2; position: relative; height: 16px; }
-.pulse-axis-inner span { position: absolute; transform: translateX(-50%); font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-700); white-space: nowrap; }
-.pulse-axis-inner span:first-child { transform: none; }
-.pulse-axis-inner span:last-child { transform: translateX(-100%); }
-@media (max-width: 720px) {
-  .pulse { padding: var(--space-4); }
-  .pulse-lane { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label total" "plot plot"; row-gap: var(--space-2); }
-  .pulse-label { grid-area: label; } .pulse-total { grid-area: total; } .pulse-plot { grid-area: plot; }
-  .pulse-axis { grid-template-columns: 1fr; } .pulse-axis-inner { grid-column: 1; }
-  .pulse-spike { display: none; }
-  .pulse-spike-note { display: block; }
-  .pulse-lane:first-child .pulse-plot { margin-top: 0; }
-}
-
+/* ── Brief: DDoS attack flows (renderFlows) ─────────────────────────────────────────────── */
+.flows { padding: var(--space-5) var(--space-6); margin-bottom: var(--space-5); gap: var(--space-3); }
+.flows-head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.flows-head h3 { font-size: 17px; }
+.flows-body { display: grid; grid-template-columns: minmax(0, 1fr) 17rem; gap: var(--space-5); align-items: start; }
+.flows-map { min-width: 0; }
+.fl-svg { display: block; width: 100%; height: auto; }
+.fl-land { fill: var(--color-neutral-300); stroke: var(--color-panel); stroke-width: .5; }
+.fl-land.on { fill: var(--color-accent); }
+.fl-svg.is-flows .fl-land.on { fill: var(--color-accent-400); }
+.fl-arc { fill: none; stroke: var(--color-accent-700); stroke-linecap: round; opacity: .7; stroke-dasharray: 2 6; transition: opacity .15s; }
+@media (prefers-reduced-motion: no-preference) { .fl-arc { animation: flDash 1.6s linear infinite; } @keyframes flDash { to { stroke-dashoffset: -16; } } }
+.fl-svg.has-hover .fl-arc { opacity: .12; }
+.fl-svg.has-hover .fl-arc.hi { opacity: 1; stroke: var(--color-accent-900); }
+.fl-src { fill: var(--color-neutral-800); }
+.fl-tgt { fill: color-mix(in srgb, var(--color-accent) 25%, transparent); stroke: var(--color-accent-700); stroke-width: 1.2; }
+.flows-side .card-kicker { margin-bottom: var(--space-2); }
+.flows-list { list-style: none; margin: 0; padding: 0; counter-reset: fl; }
+.flows-list li { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-3); padding: 6px 4px; border-bottom: 1px solid var(--color-divider); font-size: 13.5px; border-radius: var(--radius-sm); }
+.flows-list li:last-child { border-bottom: 0; }
+.flows-list li[data-fi] { cursor: default; }
+.flows-list li.hi { background: var(--color-accent-100); }
+.flows-list b { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.fl-cc { min-width: 0; color: var(--color-text); }
+.fl-to { color: var(--color-neutral-700); }
+.flows-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+.flows-stats div { display: flex; flex-direction: column; gap: 2px; padding: var(--space-3); border: 1px solid var(--color-divider); border-radius: var(--radius-md); background: var(--color-panel-2); }
+.flows-stats span { font-size: 12px; color: var(--color-neutral-700); }
+.flows-stats b { font-size: 14px; }
+@media (max-width: 900px) { .flows-body { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .flows { padding: var(--space-4); } .flows-stats { grid-template-columns: 1fr; } }
 /* ── Print: briefs always print light (dark tokens are screen-only); drop interactive chrome ── */
 @media print {
   .nav, .status-strip, .apj-seg, .section-controls, .export-banner, .theme-toggle, .ipcheck, [data-action="download-brief"] { display: none !important; }

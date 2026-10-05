@@ -2288,110 +2288,163 @@ function makeBrief(){
   el.innerHTML = renderStructuredBrief(pool, rwVictims);
 }
 
-/* ---------------- Brief: threat pulse (one timeline, four signals) ----------------
-   Daily (weekly past 90 days) counts over the header window and region for the four signals that
-   have dated history: ransomware claims, CISA KEV additions, security reporting, and Telegram/
-   Mastodon posts (self-claims shaded). Each lane is scaled to its own max — they're different units.
-   A source whose stored array is at its cap has lost everything older than its oldest kept entry, so
-   those buckets are hatched as "not retained" instead of drawn as zero (rwCompleteSince() does the
-   same per region for claims). Caps mirror the worker: kev 100, items ITEMS_CAP 1500, telegram 300,
-   ransomwareNews 150. */
-const PULSE_CAPS = { kev: 100, items: 1500, telegram: 300, ransomwareNews: 150 };
-function pulseOldest(list, f, cap){
-  if (list.length < cap) return null; // under its cap: nothing has been trimmed yet
-  const t = list.map(x => { const d = x[f]; return d instanceof Date ? d.getTime() : Date.parse(d); }).filter(x => !isNaN(x));
-  return t.length ? Math.min(...t) : null;
+/* ---------------- Brief: DDoS attack flows (Cloudflare Radar) ----------------
+   Drawn from the `ddosTelemetry` KV field collectDdosTelemetry() already stores (7-day window, no new
+   fetches): `l7Pairs` (source → target country share of mitigated HTTP DDoS traffic) as arcs, and
+   `l3Targets` / `l3Origins` as country fills. Equal Earth projection on filled country shapes from the
+   same world-atlas file Geo Intel loads, so it reads as a different map from Geo Intel's dot matrix.
+   Everything is a percentage of attack traffic over the week — not individual attacks, not live, and a
+   "source" country is where the traffic came from (botnets, proxies), not who ordered it. */
+const FLOW_ARCS = 24;
+let flowMode = (() => { try { const m = localStorage.getItem("apjti.flowMode"); return ["flows", "targets", "origins"].includes(m) ? m : "flows"; } catch (_){ return "flows"; } })();
+let flowGeo = null, flowGeoState = "idle", flowHover = null;
+function equalEarth(lon, lat){
+  const A1 = 1.340264, A2 = -0.081106, A3 = 0.000893, A4 = 0.003796, M = Math.sqrt(3) / 2;
+  const l = lon * Math.PI / 180, th = Math.asin(M * Math.sin(lat * Math.PI / 180)), t2 = th * th, t6 = t2 * t2 * t2;
+  return [l * Math.cos(th) / (M * (A1 + 3 * A2 * t2 + t6 * (7 * A3 + 9 * A4 * t2))), th * (A1 + A2 * t2 + t6 * (A3 + A4 * t2))];
 }
-function renderPulse(){
-  const host = $("#pulse-lanes");
-  if (!host) return;
-  const DAY = 86400000, step = rangeDays > 90 ? 7 : 1;
-  const end = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) + DAY; // end of today, UTC
-  const n = Math.ceil(rangeDays / step), start = end - n * step * DAY;
-  const bucket = t => { const i = Math.floor((t - start) / (step * DAY)); return i >= 0 && i < n ? i : -1; };
-  const ts = d => d instanceof Date ? d.getTime() : Date.parse(d);
-  const regions = geo === "all" ? [...GEO_KEYS, "other"] : [geo];
-  const telegramAndMasto = [...telegramItems, ...rwNewsItems].filter(i => itemInGeo(i));
-  const lanes = [
-    { key: "rw", label: "Ransomware claims", sub: "Leak-site posts · ransomware.live", tab: "ransomware",
-      rows: rwVictims.filter(v => victimInGeo(v)).map(v => ({ t: ts(v.date), v })), since: rwCompleteSince(regions), unit: "claims" },
-    { key: "kev", label: "Added to CISA KEV", sub: "Known exploited · worldwide", tab: "vulnerabilities", hot: true,
-      rows: (DATA.kev || []).map(k => ({ t: Date.parse(k.dateAdded + "T12:00:00Z"), k })), since: pulseOldest(DATA.kev || [], "dateAdded", PULSE_CAPS.kev), unit: "CVEs" },
-    { key: "news", label: "Security reporting", sub: geo === "all" ? "News and advisories · all feeds" : "News and advisories naming " + geoLabel(), tab: "country",
-      rows: allItems.filter(i => itemInGeo(i)).map(i => ({ t: ts(i.date) })), since: pulseOldest(allItems, "date", PULSE_CAPS.items), unit: "items" },
-    { key: "social", label: "Community posts", sub: "Telegram + Mastodon · darker = actor self-claims", tab: "telegram",
-      rows: telegramAndMasto.map(i => ({ t: ts(i.date), claim: !!i.claim })),
-      since: Math.max(pulseOldest(telegramItems, "date", PULSE_CAPS.telegram) || 0, pulseOldest(rwNewsItems, "date", PULSE_CAPS.ransomwareNews) || 0) || null, unit: "posts" }
-  ];
-  const fmtB = i => { const d = new Date(start + i * step * DAY); return d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }); };
-  $("#pulse-sub").textContent = (step === 1 ? "Daily" : "Weekly") + " · last " + rangeDays + " days · " + (geo === "all" ? "Global" : geoLabel()) + " · UTC";
-  host.innerHTML = lanes.map(L => {
-    const counts = new Array(n).fill(0), claims = new Array(n).fill(0);
-    L.rows.forEach(r => { const i = bucket(r.t); if (i >= 0){ counts[i]++; if (r.claim) claims[i]++; } });
-    const firstKept = L.since != null && L.since > start ? Math.min(n, Math.floor((L.since - start) / (step * DAY)) + 1) : 0; // buckets before this are partly or wholly trimmed
-    const total = counts.reduce((a, b) => a + b, 0), max = Math.max(1, ...counts);
-    // Spike: the biggest bucket when it clearly stands out from the typical kept one.
-    const kept = counts.slice(firstKept).filter(c => c > 0).sort((a, b) => a - b);
-    const med = kept.length ? kept[Math.floor(kept.length / 2)] : 0;
-    const peak = counts.indexOf(Math.max(...counts));
-    let spike = "";
-    if (peak >= firstKept && counts[peak] >= 3 && counts[peak] >= 2 * Math.max(1, med)){
-      let note = counts[peak] + " " + L.unit;
-      if (L.key === "rw"){
-        const top = countByKey(L.rows.filter(r => bucket(r.t) === peak).map(r => r.v), "group")[0];
-        if (top) note += " · most from " + top[0] + " (" + top[1] + ")";
-      }
-      // Anchor the label inside the plot near either edge so it never spills past the card.
-      const pct = (peak + .5) / n * 100, anchor = pct < 20 ? "start" : pct > 80 ? "end" : "mid";
-      spike = '<div class="pulse-spike pulse-spike-' + anchor + '" style="left:' + pct.toFixed(2) + '%"><span>▲ ' + esc(fmtB(peak)) + " · " + esc(note) + "</span></div>";
+const FLOW_W = 1000, FLOW_K = FLOW_W / (2 * 2.7066), FLOW_LAT_MIN = -56;
+function flowXY(lon, lat){ const p = equalEarth(lon, lat); return [FLOW_W / 2 + p[0] * FLOW_K, -p[1] * FLOW_K]; }
+async function loadFlowGeo(){
+  if (flowGeoState !== "idle") return;
+  flowGeoState = "loading";
+  try {
+    if (typeof topojson === "undefined") throw new Error("topojson-client not loaded");
+    const topo = await (await fetch(WORLD_ATLAS_URL)).json();
+    const byName = {};
+    if (regionNames) for (let a = 65; a <= 90; a++) for (let b = 65; b <= 90; b++){
+      const code = String.fromCharCode(a, b);
+      try { const n = regionNames.of(code); if (n && n !== code) byName[n.toLowerCase()] = code; } catch (_){}
     }
-    // Change vs the previous equal period, only where that period is fully retained.
-    let delta = "";
-    if (L.key === "rw" || L.key === "kev"){
-      const prevStart = start - n * step * DAY;
-      if (L.since == null || L.since <= prevStart){
-        const prev = L.rows.filter(r => r.t >= prevStart && r.t < start).length, d = total - prev;
-        delta = '<span class="pulse-delta">' + (d > 0 ? "▲ " + d : d < 0 ? "▼ " + Math.abs(d) : "no change") + " vs prior " + rangeDays + "d</span>";
-      }
+    const shapes = [], centroid = {};
+    for (const f of topojson.feature(topo, topo.objects.countries).features){
+      const num = f.id == null ? "" : String(f.id).padStart(3, "0");
+      if (num === "010" || !f.geometry) continue; // Antarctica
+      const cc = ISO_NUM[num] || byName[String((f.properties && f.properties.name) || "").toLowerCase()] || null;
+      const polys = f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates;
+      let d = "", best = null;
+      for (const poly of polys) poly.forEach((ring, ri) => {
+        let prevLon = null, seg = "";
+        const pts = ring.map(([lon, lat]) => flowXY(lon, Math.max(lat, FLOW_LAT_MIN - 4)));
+        ring.forEach(([lon], k) => {
+          // Rings that cross the antimeridian jump ~360°; start a new subpath instead of drawing across the map.
+          const jump = prevLon !== null && Math.abs(lon - prevLon) > 180;
+          seg += (k === 0 || jump ? "M" : "L") + pts[k][0].toFixed(1) + " " + pts[k][1].toFixed(1);
+          prevLon = lon;
+        });
+        d += seg + "Z";
+        if (ri === 0 && cc){
+          let A = 0, cx = 0, cy = 0;
+          for (let i = 0, j = pts.length - 1; i < pts.length; j = i++){ const c = pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1]; A += c; cx += (pts[j][0] + pts[i][0]) * c; cy += (pts[j][1] + pts[i][1]) * c; }
+          if (A && (!best || Math.abs(A) > best.a)) best = { a: Math.abs(A), x: cx / (3 * A), y: cy / (3 * A) };
+        }
+      });
+      shapes.push({ cc, d });
+      if (cc && best) centroid[cc] = [best.x, best.y];
     }
-    if (!delta && firstKept > 0) delta = '<span class="pulse-delta">Retained from ' + esc(fmtB(firstKept)) + "</span>";
-    const W = n * 10, H = 44, bw = 10 * (step === 1 && n <= 31 ? .72 : .86);
-    const bars = counts.map((c, i) => {
-      const x = i * 10 + (10 - bw) / 2;
-      if (i < firstKept) return '<rect class="pulse-gap" x="' + (i * 10) + '" y="0" width="10" height="' + H + '"><title>' + esc(fmtB(i)) + ": not retained</title></rect>";
-      const h = c ? Math.max(2, c / max * (H - 2)) : 0, ch = claims[i] ? Math.max(1.5, claims[i] / max * (H - 2)) : 0;
-      const tip = esc(fmtB(i)) + (step > 1 ? " week" : "") + ": " + c + " " + L.unit + (claims[i] ? " (" + claims[i] + " self-claims)" : "");
-      return '<g class="pulse-b' + (L.key === "rw" && c ? " pulse-click" : "") + '" data-i="' + i + '"><rect class="pulse-hit" x="' + (i * 10) + '" y="0" width="10" height="' + H + '"></rect>' +
-        (h ? '<rect class="pulse-bar' + (L.hot ? " hot" : "") + '" x="' + x.toFixed(1) + '" y="' + (H - h).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="1"></rect>' : '<rect class="pulse-zero" x="' + x.toFixed(1) + '" y="' + (H - 1) + '" width="' + bw.toFixed(1) + '" height="1"></rect>') +
-        (ch ? '<rect class="pulse-bar claim" x="' + x.toFixed(1) + '" y="' + (H - ch).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + ch.toFixed(1) + '" rx="1"></rect>' : "") +
-        "<title>" + tip + "</title></g>";
-    }).join("");
-    return '<div class="pulse-lane" data-lane="' + L.key + '">' +
-      '<button type="button" class="pulse-label" data-tab="' + L.tab + '"><b>' + esc(L.label) + "</b><span>" + esc(L.sub) + "</span>" + (spike ? '<em class="pulse-spike-note">' + spike.replace(/<[^>]+>/g, "") + "</em>" : "") + "</button>" +
-      '<div class="pulse-plot">' + spike + '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" role="img" aria-label="' + esc(L.label + ": " + total + " " + L.unit + " in the last " + rangeDays + " days") + '"><defs><pattern id="pulse-hatch-' + L.key + '" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.5" height="4" class="pulse-hatch"></rect></pattern></defs>' +
-        bars.replace(/class="pulse-gap"/g, 'class="pulse-gap" fill="url(#pulse-hatch-' + L.key + ')"') + "</svg></div>" +
-      '<div class="pulse-total"><b>' + total.toLocaleString() + "</b><span>" + esc(L.unit) + "</span>" + delta + "</div>" +
-    "</div>";
-  }).join("");
-  const ticks = 5, axis = [];
-  for (let k = 0; k < ticks; k++){ const i = Math.round(k * (n - 1) / (ticks - 1)); axis.push('<span style="left:' + ((i + .5) / n * 100).toFixed(2) + '%">' + esc(fmtB(i)) + "</span>"); }
-  $("#pulse-axis").innerHTML = '<div class="pulse-axis-inner">' + axis.join("") + "</div>";
+    flowGeo = { shapes, centroid };
+    flowGeoState = "ready";
+  } catch (e){
+    flowGeoState = "failed";
+    console.warn("Attack flows: world atlas unavailable", e);
+  }
+  renderFlows();
 }
-function wirePulse(){
-  const el = $("#pulse");
+function flowPoint(cc){
+  if (flowGeo && flowGeo.centroid[cc]) return flowGeo.centroid[cc];
+  const c = CENTROIDS[cc];
+  return c ? flowXY(c[1], c[0]) : null;
+}
+function flowPct(p){ return p >= 10 ? p.toFixed(0) + "%" : p >= 1 ? p.toFixed(1) + "%" : p.toFixed(2) + "%"; }
+function renderFlows(){
+  const mapEl = $("#flows-map");
+  if (!mapEl) return;
+  document.querySelectorAll("[data-flowmode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.flowmode === flowMode)));
+  const t = DATA.ddosTelemetry;
+  if (!t || !(t.l7Pairs || []).length && !(t.l3Targets || []).length){
+    mapEl.innerHTML = '<div class="empty">No Cloudflare Radar data yet. It needs the CF_RADAR_TOKEN secret and one full collection.</div>';
+    ["#flows-list", "#flows-stats"].forEach(s => { $(s).innerHTML = ""; });
+    $("#flows-sub").textContent = ""; $("#flows-note").textContent = ""; $("#flows-list-h").textContent = "";
+    return;
+  }
+  if (flowGeoState === "idle") loadFlowGeo();
+  const inGeo = cc => geo === "all" || ccRegion(cc) === geo;
+  $("#flows-sub").textContent = "Last 7 days · share of attack traffic Cloudflare mitigated · updated " + relTime(t.generated) + (geo === "all" ? "" : " · flows touching " + geoLabel());
+
+  // Country fills: L3 target or source share; in flow mode, the share of L7 traffic each country received.
+  const fill = {};
+  if (flowMode === "flows") (t.l7Pairs || []).forEach(p => { fill[p.to] = (fill[p.to] || 0) + p.pct; });
+  else (flowMode === "targets" ? t.l3Targets : t.l3Origins || []).forEach(r => { fill[r.cc] = r.pct; });
+  const fmax = Math.max(0.0001, ...Object.values(fill));
+  const shade = cc => fill[cc] ? Math.min(.85, .12 + .73 * Math.sqrt(fill[cc] / fmax)) : 0;
+
+  const pairs = (t.l7Pairs || []).filter(p => inGeo(p.from) || inGeo(p.to));
+  const arcs = pairs.filter(p => p.from !== p.to).slice(0, FLOW_ARCS);
+  const amax = Math.max(0.0001, ...arcs.map(p => p.pct));
+  const y0 = flowXY(0, 84)[1], y1 = flowXY(0, FLOW_LAT_MIN)[1];
+  const land = flowGeo ? flowGeo.shapes.map(s => '<path class="fl-land' + (s.cc && fill[s.cc] ? " on" : "") + '"' + (s.cc && fill[s.cc] ? ' style="fill-opacity:' + shade(s.cc).toFixed(2) + '"' : "") + ' d="' + s.d + '"><title>' + esc(s.cc ? ccName(s.cc) + (fill[s.cc] ? " · " + flowPct(fill[s.cc]) : "") : "") + "</title></path>").join("") : "";
+  let arcSvg = "", dots = "";
+  if (flowMode === "flows"){
+    arcs.forEach((p, i) => {
+      const a = flowPoint(p.from), b = flowPoint(p.to);
+      if (!a || !b) return;
+      const dx = b[0] - a[0], dy = b[1] - a[1], dist = Math.hypot(dx, dy) || 1;
+      const lift = Math.min(160, dist * .32); // bow each arc upward (screen-space normal pointing up)
+      const nx = -dy / dist, ny = dx / dist, s = ny > 0 ? -1 : 1;
+      const cx = (a[0] + b[0]) / 2 + nx * lift * s, cy = (a[1] + b[1]) / 2 + ny * lift * s;
+      const w = (0.8 + 4.2 * Math.sqrt(p.pct / amax)).toFixed(2);
+      arcSvg += '<path class="fl-arc" data-fi="' + i + '" style="stroke-width:' + w + 'px" d="M' + a[0].toFixed(1) + " " + a[1].toFixed(1) + "Q" + cx.toFixed(1) + " " + cy.toFixed(1) + " " + b[0].toFixed(1) + " " + b[1].toFixed(1) + '"><title>' + esc(ccName(p.from) + " → " + ccName(p.to) + " · " + flowPct(p.pct)) + "</title></path>";
+    });
+    const tgt = {}, src = {};
+    arcs.forEach(p => { tgt[p.to] = (tgt[p.to] || 0) + p.pct; src[p.from] = (src[p.from] || 0) + p.pct; });
+    pairs.filter(p => p.from === p.to).forEach(p => { tgt[p.to] = (tgt[p.to] || 0) + p.pct; });
+    Object.keys(src).forEach(cc => { const q = flowPoint(cc); if (q && !tgt[cc]) dots += '<circle class="fl-src" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="2.6"></circle>'; });
+    const tmax = Math.max(0.0001, ...Object.values(tgt));
+    Object.entries(tgt).forEach(([cc, v]) => { const q = flowPoint(cc); if (q) dots += '<circle class="fl-tgt" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + (3 + 9 * Math.sqrt(v / tmax)).toFixed(1) + '"><title>' + esc(ccName(cc) + " received " + flowPct(v) + " of the listed flows") + "</title></circle>"; });
+  }
+  mapEl.innerHTML = '<svg class="fl-svg' + (flowMode === "flows" ? " is-flows" : "") + '" viewBox="0 ' + y0.toFixed(0) + " " + FLOW_W + " " + (y1 - y0).toFixed(0) + '" role="img" aria-label="' +
+    esc(flowMode === "flows" ? "World map of the top source-to-target country flows of HTTP DDoS traffic, last 7 days" : "World map shaded by share of network-layer DDoS traffic " + (flowMode === "targets" ? "targeting" : "originating in") + " each country, last 7 days") + '">' +
+    '<g class="fl-lands">' + land + "</g>" + '<g class="fl-arcs">' + arcSvg + "</g><g>" + dots + "</g></svg>";
+
+  // Ranked list for the active mode.
+  let rows;
+  if (flowMode === "flows"){
+    $("#flows-list-h").textContent = "Top HTTP flows · source → target";
+    rows = pairs.slice(0, 10).map(p => { const i = arcs.indexOf(p); return '<li' + (i >= 0 ? ' data-fi="' + i + '"' : "") + ' tabindex="0"><span class="fl-cc">' + (p.from === p.to ? esc(ccName(p.to)) + ' <span class="rw-dim">(within)</span>' : esc(ccName(p.from)) + ' <span class="fl-to">→</span> ' + esc(ccName(p.to))) + '</span><b>' + flowPct(p.pct) + "</b></li>"; });
+  } else {
+    const list = ((flowMode === "targets" ? t.l3Targets : t.l3Origins) || []).filter(r => inGeo(r.cc));
+    $("#flows-list-h").textContent = (flowMode === "targets" ? "Most targeted" : "Largest sources") + " · L3/L4" + (geo === "all" ? "" : " · " + geoLabel());
+    rows = list.slice(0, 10).map(r => '<li><a class="fl-cc" href="#country/' + esc(r.cc) + '">' + esc(ccName(r.cc)) + "</a><b>" + flowPct(r.pct) + "</b></li>");
+  }
+  $("#flows-list").innerHTML = rows.length ? rows.join("") : '<li class="rw-dim">Nothing for ' + esc(geoLabel()) + " in Cloudflare's top 50.</li>";
+
+  const top = (l, f) => (l && l.length) ? f(l[0]) : "—";
+  const long = (t.duration || []).find(d => /> ?3 ?h/.test(d.label));
+  $("#flows-stats").innerHTML =
+    '<div><span>Most common L3/L4 vector</span><b>' + esc(top((t.l3 || {}).global, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
+    '<div><span>Most targeted industry (L7)</span><b>' + esc(top(t.l7Industries, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
+    '<div><span>L3/L4 attacks lasting over 3 hours</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
+  $("#flows-note").innerHTML = "Shares of DDoS traffic Cloudflare mitigated on its own network, worldwide, over the last 7 days, not individual attacks and not live. " +
+    "A source country is where attack traffic came from (often botnets or proxies), not who is behind it. Arcs show the top " + arcs.length + " HTTP flows between different countries; traffic within one country is ringed. " +
+    'Data: <a href="https://radar.cloudflare.com/security/network-layer" target="_blank" rel="noopener">Cloudflare Radar</a> (CC BY-NC 4.0). Per-country detail is on <a href="#country">Geo Intel</a>.';
+}
+function setFlowHover(i){
+  flowHover = i;
+  const svg = $("#flows-map svg");
+  if (svg) svg.classList.toggle("has-hover", i != null);
+  document.querySelectorAll("#flows [data-fi]").forEach(el => el.classList.toggle("hi", i != null && el.dataset.fi === String(i)));
+}
+function wireFlows(){
+  const el = $("#flows");
   if (!el) return;
   el.addEventListener("click", e => {
-    const lab = e.target.closest(".pulse-label");
-    if (lab){ showTab(lab.dataset.tab); window.scrollTo(0, 0); return; }
-    const g = e.target.closest(".pulse-click");
-    if (g && rangeDays <= 90){
-      // A ransomware day opens the claims table filtered to that UTC day.
-      const DAY = 86400000, n = rangeDays;
-      const end = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) + DAY;
-      rwF.day = new Date(end - (n - parseInt(g.dataset.i, 10)) * DAY).toISOString().slice(0, 10); rwPage = 0;
-      showTab("ransomware"); renderRw(); window.scrollTo(0, 0);
-    }
+    const b = e.target.closest("[data-flowmode]");
+    if (b){ flowMode = b.dataset.flowmode; try { localStorage.setItem("apjti.flowMode", flowMode); } catch (_){} renderFlows(); }
   });
+  const over = e => { const t = e.target.closest("[data-fi]"); setFlowHover(t ? t.dataset.fi : null); };
+  el.addEventListener("mouseover", over);
+  el.addEventListener("focusin", over);
+  el.addEventListener("mouseleave", () => setFlowHover(null));
 }
 
 /* ---------------- Markdown export ---------------- */
@@ -3380,7 +3433,7 @@ function wireActions(){
     rangeDays = parseInt(c.dataset.t, 10);
     localStorage.setItem("apjti.range", String(rangeDays));
     document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.t === c.dataset.t)));
-    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); renderActors(); renderPulse(); buildDashboard();
+    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); renderActors(); buildDashboard();
   }));
   document.querySelectorAll("[data-geo]").forEach(c => c.addEventListener("click", () => setGeo(c.dataset.geo)));
   document.querySelectorAll("[data-tgf]").forEach(c => c.addEventListener("click", () => {
@@ -3718,7 +3771,7 @@ async function renderAll(){
   renderSnapshot();
   renderKev();
   makeBrief();
-  renderPulse();
+  renderFlows();
   buildDashboard();
 }
 
@@ -3735,7 +3788,7 @@ async function init(){
   wireRw();
   wireVulns();
   wireActors();
-  wirePulse();
+  wireFlows();
   wireIpCheck();
   wireNavToggle();
   wireThemeToggle();
