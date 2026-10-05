@@ -2366,7 +2366,7 @@ function renderFlows(){
   document.querySelectorAll("[data-flowmode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.flowmode === flowMode)));
   const t = DATA.ddosTelemetry;
   if (!t || !(t.l7Pairs || []).length && !(t.l3Targets || []).length){
-    mapEl.innerHTML = '<div class="empty">No Cloudflare Radar data yet. It needs the CF_RADAR_TOKEN secret and one full collection.</div>';
+    mapEl.innerHTML = '<div class="empty">No measured DDoS data yet.</div>'; // needs the CF_RADAR_TOKEN secret and one full collection
     mapEl.hidden = false; $("#flows-globe").hidden = true;
     ["#flows-list", "#flows-stats"].forEach(s => { $(s).innerHTML = ""; });
     $("#flows-sub").textContent = ""; $("#flows-note").textContent = ""; $("#flows-list-h").textContent = "";
@@ -2374,7 +2374,7 @@ function renderFlows(){
   }
   if (flowGlobeState === "idle") initFlowGlobe();
   const inGeo = cc => geo === "all" || ccRegion(cc) === geo;
-  $("#flows-sub").textContent = "Where DDoS traffic Cloudflare mitigated came from and went, as a share of the week's total. Updated " + relTime(t.generated) + (geo === "all" ? "." : "; showing flows that touch " + geoLabel() + ".");
+  $("#flows-sub").textContent = "Where mitigated DDoS traffic came from and went, as a share of the week's total. Updated " + relTime(t.generated) + (geo === "all" ? "." : "; showing flows that touch " + geoLabel() + ".");
 
   // Country fills: L3 target or source share; in flow mode, the share of L7 traffic each country received.
   const fill = {};
@@ -2401,7 +2401,7 @@ function renderFlows(){
     $("#flows-list-h").textContent = (flowMode === "targets" ? "Most targeted" : "Largest sources") + " · L3/L4" + (geo === "all" ? "" : " · " + geoLabel());
     rows = list.slice(0, 10).map(r => '<li><a class="fl-cc" href="#country/' + esc(r.cc) + '">' + esc(ccName(r.cc)) + "</a><b>" + flowPct(r.pct) + "</b></li>");
   }
-  $("#flows-list").innerHTML = rows.length ? rows.join("") : '<li class="rw-dim">Nothing for ' + esc(geoLabel()) + " in Cloudflare's top 50.</li>";
+  $("#flows-list").innerHTML = rows.length ? rows.join("") : '<li class="rw-dim">Nothing for ' + esc(geoLabel()) + " in the top 50 flows.</li>";
 
   const top = (l, f) => (l && l.length) ? f(l[0]) : "—";
   const long = (t.duration || []).find(d => /> ?3 ?h/.test(d.label));
@@ -2409,9 +2409,10 @@ function renderFlows(){
     '<div><span>Most common L3/L4 vector</span><b>' + esc(top((t.l3 || {}).global, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
     '<div><span>Most targeted industry (L7)</span><b>' + esc(top(t.l7Industries, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
     '<div><span>L3/L4 attacks lasting over 3 hours</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
-  $("#flows-note").innerHTML = "Shares of DDoS traffic Cloudflare mitigated on its own network, worldwide, over the last 7 days, not individual attacks and not live. " +
+  $("#flows-note").innerHTML = "Shares of mitigated DDoS traffic, worldwide, over the last 7 days, not individual attacks and not live. " +
     "A source country is where attack traffic came from (often botnets or proxies), not who is behind it. Arcs show the top " + arcs.length + " HTTP flows between different countries; traffic within one country is ringed. " +
-    'Data: <a href="https://radar.cloudflare.com/security/network-layer" target="_blank" rel="noopener">Cloudflare Radar</a> (CC BY-NC 4.0). Per-country detail is on <a href="#country">Geo Intel</a>.';
+    // Attribution is a condition of the data's CC BY-NC 4.0 licence; keep this credit.
+    'Per-country detail is on <a href="#country">Geo Intel</a>. <span class="flows-credit">Data: <a href="https://radar.cloudflare.com/security/network-layer" target="_blank" rel="noopener">Cloudflare Radar</a>, CC BY-NC 4.0.</span>';
 }
 // Fallback 2D map (no WebGL / CDN): Equal Earth SVG with arcs or country fills.
 function renderFlatFlows(m){

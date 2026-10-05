@@ -1058,6 +1058,7 @@ body.rw-drawer-open { overflow: hidden; }
 .flows-stats span { font-size: 12px; color: var(--color-neutral-700); }
 .flows-stats b { font-size: 14px; }
 .flows .rw-panel-note { padding: var(--space-3) var(--space-6) var(--space-5); margin: 0; }
+.flows-credit { white-space: nowrap; opacity: .8; }
 @media (max-width: 960px) {
   .flows-hero { grid-template-columns: 1fr; }
   .flows-stage { min-height: 360px; order: -1; }
