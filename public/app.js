@@ -274,7 +274,7 @@ function showTab(id, opts){
   if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id + (id === "country" && cpCC ? "/" + cpCC : ""));
   if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
   if (id === "ransomware" && rwTrendInst) rwTrendInst.resize();
-  if (id !== "ransomware") closeDrawer();
+  closeDrawer(); // the side drawer belongs to the tab that opened it
   document.body.classList.toggle("map-mode", id === "country"); // before syncView(): sizes depend on layout
   if (id === "country"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
@@ -1234,7 +1234,7 @@ function renderKev(){
   }).join("");
 }
 
-/* ---------------- Rendering: Critical Vulnerabilities tab (NVD + GHSA + KEV, merged by CVE) ---------------- */
+/* ---------------- Vulnerabilities: severity colour classes (also used by the Brief) ---------------- */
 function cvssClass(score){
   if (score == null) return "";
   if (score >= 9) return "cvss-critical";
@@ -1251,43 +1251,412 @@ function epssClass(score){
   if (score >= 0.1) return "cvss-high";
   return "cvss-med";
 }
+/* ---------------- Vulnerabilities page: priority queue, KEV strip, CVE drawer, product watchlist ----------------
+   Over /api/data's `vulnerabilities` (NVD CVSS 7+, GitHub Advisories, CISA KEV, merged by CVE in the
+   worker, with `vx` enrichment — see the comment above cvssSourceName() in src/worker.js). Priority is
+   a transparent tier policy (vulnPriority()), spelled out on the page under "How prioritization works";
+   keep the two in step. EPSS_LIKELY is the one EPSS line used by the tiers, the filter and the matrix. */
+const EPSS_LIKELY = 0.1;
+const VN_PAGE_SIZE = 25;
+const VN_TIERS = { 1: "Act now", 2: "Likely exploited", 3: "Severe", 4: "Monitor" };
+let vnDays = (() => { try { const d = parseInt(localStorage.getItem("apjti.vnDays"), 10); return [0, 7, 30, 90].includes(d) ? d : 0; } catch (_){ return 0; } })();
+let vnDateField = (() => { try { return localStorage.getItem("apjti.vnDateField") || "activity"; } catch (_){ return "activity"; } })();
+let vnSort = "priority", vnPage = 0, vnRows = [];
+if (!["all", "kev", "likely", "critical", "watch", "waf"].includes(vulnFilter)) vulnFilter = "all";
+
+function vxOf(v){ return v.vx || {}; }
+function vnTime(s){ const t = s ? Date.parse(s) : NaN; return isNaN(t) ? null : t; }
+function vnDates(v){
+  const vx = vxOf(v);
+  return {
+    published: vnTime(vx.published) || (v.kev ? null : (v.date ? v.date.getTime() : null)),
+    modified: vnTime(vx.modified),
+    kev: vnTime(vx.kevAdded) || (v.kev && v.date ? v.date.getTime() : null),
+    seen: vnTime(v.seen)
+  };
+}
+function vnDateOf(v, field){
+  const d = vnDates(v);
+  return field === "activity" ? Math.max(d.published || 0, d.modified || 0, d.kev || 0) || null : d[field];
+}
+function fmtIsoDay(t){ return t ? new Date(t).toISOString().slice(0, 10) : ""; }
+function vnProducts(v){ return (vxOf(v).products || []).filter(p => p.product); }
+// "Cisco" + "Cisco Catalyst SD-WAN Manager" → just the product.
+function vnProdName(p){
+  const first = String(p.vendor || "").split(/\s+/)[0].toLowerCase();
+  return first && String(p.product).toLowerCase().startsWith(first) ? p.product : [p.vendor, p.product].filter(Boolean).join(" ");
+}
+function vnProductLabel(v){
+  const p = vnProducts(v)[0];
+  return p ? vnProdName(p) : "";
+}
+// Titles from NVD are just "CVE-… (CVSS n)"; KEV and GitHub carry a real name.
+function vnShortTitle(v){
+  const t = String(v.title || "").replace(/^GHSA-[\w-]+ \(CVE-[\d-]+\): /, "");
+  if (t && !/^CVE-\d+-\d+( \(CVSS [\d.]+\))?$/.test(t)) return t;
+  const d = String(v.desc || "").replace(/^CVSS [\d.]+\. |^Severity: \w+\. /, "");
+  const s = d.split(/(?<=\.)\s/)[0] || d;
+  return s.length > 140 ? s.slice(0, 139) + "…" : s;
+}
+
+// --- product watchlist (this browser) ---
+function loadVnWatch(){ try { const w = JSON.parse(localStorage.getItem("apjti.vulnWatch") || "[]"); return Array.isArray(w) ? w : []; } catch (_){ return []; } }
+let vnWatch = loadVnWatch();
+function vnNorm(s){ return " " + String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() + " "; }
+// A product match says nothing about the version in use — the drawer shows the affected ranges.
+function vnWatchMatches(v){
+  if (!vnWatch.length) return [];
+  const out = [];
+  const prods = vnProducts(v).length ? vnProducts(v) : (v.vendor || v.product ? [{ vendor: v.vendor, product: v.product, src: "CISA KEV" }] : []);
+  for (const w of vnWatch){
+    const wn = vnNorm(w).trim();
+    if (!wn) continue;
+    const p = prods.find(p => vnNorm((p.vendor || "") + " " + p.product).includes(" " + wn + " ") || vnNorm(p.product).includes(" " + wn + " "));
+    if (p) out.push({ term: w, product: vnProdName(p), inferred: p.src === "inferred" });
+  }
+  return out;
+}
+
+// --- browser-local assessment ---
+function loadVnAssess(){ try { return JSON.parse(localStorage.getItem("apjti.vulnAssess") || "{}"); } catch (_){ return {}; } }
+const VN_STATUS = { "": "Not assessed", affected: "Affected", not_affected: "Not affected", mitigated: "Mitigated", fixed: "Fixed" };
+const VN_EDGE_ASSESS = { "": "Not tested", validated: "Rule validated in our environment", ineffective: "Rule not effective / not applicable here" };
+
+// --- priority ---
+function vnExploitSignals(v){
+  const vx = vxOf(v), out = [];
+  if (v.kev) out.push({ k: "kev", text: "Known exploited · CISA KEV" + (vx.kevAdded ? ", added " + vx.kevAdded : "") });
+  if (vx.ssvc === "active") out.push({ k: "active", text: "CISA SSVC: exploitation active" });
+  if (vx.maturity === "ATTACKED") out.push({ k: "active", text: "CNA reports attacks (CVSS 4.0 E:A)" });
+  if (vx.refs && vx.refs.exploit) out.push({ k: "poc", text: "Public exploit referenced (NVD tag)" });
+  if (vx.maturity === "PROOF_OF_CONCEPT") out.push({ k: "poc", text: "Proof of concept reported by CNA (E:P)" });
+  if (vx.ssvc === "poc") out.push({ k: "poc", text: "CISA SSVC: proof of concept" });
+  return out;
+}
+function vulnPriority(v){
+  const ex = vnExploitSignals(v), vx = vxOf(v), reasons = [];
+  const watched = vnWatchMatches(v);
+  let tier = 4;
+  if (ex.some(e => e.k === "kev" || e.k === "active")) tier = 1;
+  else if ((v.epss != null && v.epss >= EPSS_LIKELY) || ex.some(e => e.k === "poc")) tier = 2;
+  else if (v.cvssScore != null && v.cvssScore >= 9) tier = 3;
+  ex.forEach(e => reasons.push({ text: e.text, hot: e.k !== "poc" }));
+  if (vx.kevRansomware) reasons.push({ text: "Known ransomware use", hot: true });
+  if (watched.length) reasons.push({ text: "Watched product: " + watched[0].product + (watched[0].inferred ? " (inferred)" : ""), watch: true });
+  if (v.epss != null && v.epss >= EPSS_LIKELY) reasons.push({ text: "EPSS " + (v.epss * 100).toFixed(1) + "%" + (v.epssPercentile != null ? " · top " + Math.max(1, Math.round((1 - v.epssPercentile) * 100)) + "%" : "") });
+  if (v.cvssScore != null && v.cvssScore >= 9) reasons.push({ text: "CVSS " + v.cvssScore.toFixed(1) + " critical" });
+  return { tier, label: VN_TIERS[tier], reasons, watched: watched.length > 0 };
+}
+function vnFixInfo(v){
+  const vx = vxOf(v);
+  const fixed = vnProducts(v).map(p => p.fixed).filter(Boolean);
+  if (fixed.length) return { cls: "fix", text: "Fixed in " + fixed[0].split(", ")[0] + (fixed.length > 1 || /,/.test(fixed[0]) ? " +" : "") };
+  if (vx.refs && vx.refs.patch) return { cls: "fix", text: "Patch referenced" };
+  if (vx.refs && vx.refs.advisory) return { cls: "adv", text: "Vendor advisory" };
+  if (vx.kevAction) return { cls: "adv", text: "CISA action set" };
+  return { cls: "none", text: "Not stated" };
+}
+const VN_EDGE = { documented: "Documented rule", potential: "Potential", na: "Not applicable", unknown: "Unknown" };
+function vnEdge(v){ return (vxOf(v).edge) || { cls: "unknown", why: "Not classified yet" }; }
+
+// --- scope + filters ---
+function vnScoped(){
+  if (!vnDays) return vulnItems.slice();
+  const from = Date.now() - vnDays * 86400000;
+  return vulnItems.filter(v => { const t = vnDateOf(v, vnDateField); return t != null && t >= from; });
+}
 function visibleVulns(){
-  let list = vulnItems.slice();
+  let list = vnScoped();
   if (vulnFilter === "critical") list = list.filter(v => v.cvssScore != null && v.cvssScore >= 9);
-  else if (vulnFilter === "kev") list = list.filter(v => v.kev);
-  else if (vulnFilter === "waf") list = list.filter(v => v.waf);
-  else if (vulnFilter === "epss") list = list.filter(v => v.epss != null && v.epss >= 0.5);
-  if (vulnSearch) list = list.filter(v => (v.cveId + " " + (v.vendor||"") + " " + (v.product||"") + " " + (v.desc||"")).toLowerCase().includes(vulnSearch));
-  list.sort((a,b) => ((b.cvssScore==null?-1:b.cvssScore) - (a.cvssScore==null?-1:a.cvssScore)) || ((b.date?b.date.getTime():0) - (a.date?a.date.getTime():0)));
-  return list;
+  else if (vulnFilter === "kev") list = list.filter(v => vulnPriority(v).tier === 1);
+  else if (vulnFilter === "likely") list = list.filter(v => vulnPriority(v).tier === 2);
+  else if (vulnFilter === "watch") list = list.filter(v => vnWatchMatches(v).length);
+  else if (vulnFilter === "waf") list = list.filter(v => ["potential", "documented"].includes(vnEdge(v).cls));
+  if (vulnSearch) list = list.filter(v => (v.cveId + " " + v.title + " " + vnProducts(v).map(p => p.vendor + " " + p.product).join(" ") + " " + (v.vendor || "") + " " + (v.product || "") + " " + (v.desc || "")).toLowerCase().includes(vulnSearch));
+  const num = x => x == null ? -1 : x;
+  const P = new Map(list.map(v => [v, vulnPriority(v)]));
+  const byDate = f => (a, b) => num(vnDateOf(b, f)) - num(vnDateOf(a, f));
+  const sorts = {
+    priority: (a, b) => (P.get(a).tier - P.get(b).tier) || (Number(P.get(b).watched) - Number(P.get(a).watched)) || (num(b.epss) - num(a.epss)) || (num(b.cvssScore) - num(a.cvssScore)) || byDate("activity")(a, b),
+    cvss: (a, b) => (num(b.cvssScore) - num(a.cvssScore)) || (num(b.epss) - num(a.epss)),
+    epss: (a, b) => (num(b.epss) - num(a.epss)) || (num(b.cvssScore) - num(a.cvssScore)),
+    published: byDate("published"), modified: byDate("modified"), kev: byDate("kev")
+  };
+  return list.sort(sorts[vnSort] || sorts.priority);
+}
+function vnPeriodLabel(){
+  const f = { activity: "latest activity", published: "published", modified: "last updated", kev: "added to KEV" }[vnDateField];
+  return vnDays ? f + " in the last " + vnDays + " days" : "all " + vulnItems.length + " retained CVEs";
+}
+
+// --- render ---
+function cvssCell(v){
+  if (v.cvssScore == null) return '<span class="rw-dim" title="No CVSS score published yet">Not scored</span>';
+  const sev = v.cvssScore >= 9 ? "Critical" : v.cvssScore >= 7 ? "High" : v.cvssScore >= 4 ? "Medium" : "Low";
+  return '<span class="cvss-badge ' + cvssClass(v.cvssScore) + '" title="CVSS ' + esc(vxOf(v).cvssVer || "") + " base score, " + sev.toLowerCase() + ' severity">' + v.cvssScore.toFixed(1) + '</span><div class="vn-sub">' + sev + (vxOf(v).cvssVer ? " · v" + esc(vxOf(v).cvssVer) : "") + "</div>";
+}
+function epssCell(v){
+  if (v.epss == null) return '<span class="rw-dim">—</span>';
+  return '<span class="vn-epss' + (v.epss >= EPSS_LIKELY ? " vn-epss-hi" : "") + '" title="Probability of exploitation activity in the next 30 days (FIRST EPSS' + (v.epssDate ? ", scored " + esc(v.epssDate) : "") + ')">' + (v.epss * 100).toFixed(v.epss < 0.01 ? 2 : 1) + "%</span>" +
+    (v.epssPercentile != null ? '<div class="vn-sub">' + Math.round(v.epssPercentile * 100) + "th pct</div>" : "");
+}
+function exploitCell(v){
+  const ex = vnExploitSignals(v);
+  if (v.kev) return '<span class="tag vn-kev-tag">Known exploited</span><div class="vn-sub">CISA KEV' + (vxOf(v).kevRansomware ? " · ransomware use" : "") + "</div>";
+  if (ex.some(e => e.k === "active")) return '<span class="tag vn-kev-tag">Exploitation reported</span><div class="vn-sub">' + esc(ex.find(e => e.k === "active").text.split(" (")[0]) + "</div>";
+  if (ex.length) return '<span class="tag tag-outline">Public PoC / exploit</span>';
+  return '<span class="rw-dim">No evidence collected</span>';
 }
 function renderVulnerabilities(){
   const el = $("#vuln-list");
   if (!el) return;
   document.querySelectorAll("[data-vf]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.vf === vulnFilter)));
-  const covEl = $("#vuln-cov");
-  if (covEl) covEl.textContent = vulnItems.length
-    ? "Coverage: " + vulnItems.length + " CVE(s) tracked · " + vulnItems.filter(v => v.kev).length + " actively exploited (CISA KEV) · " + vulnItems.filter(v => v.waf).length + " WAF-mitigable class(es) · " + vulnItems.filter(v => v.epss != null && v.epss >= 0.5).length + " with EPSS ≥ 50%."
-      + (DATA.vulnGenerated ? " CVE sources last checked " + new Date(DATA.vulnGenerated).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) + " (refreshes every 10 min)." : "")
+  document.querySelectorAll("[data-vd]").forEach(x => x.setAttribute("aria-pressed", String(parseInt(x.dataset.vd, 10) === vnDays)));
+  const fieldSel = $("#vn-date-field"); if (fieldSel) fieldSel.value = vnDateField;
+  const sortSel = $("#vn-sort"); if (sortSel) sortSel.value = vnSort;
+  const scoped = vnScoped();
+  $("#vn-scope").textContent = scoped.length + " CVEs · " + vnPeriodLabel();
+  renderVnFresh(); renderVnKpis(scoped); renderVnKev(scoped); renderVnChanges();
+
+  vnRows = visibleVulns();
+  const pages = Math.max(1, Math.ceil(vnRows.length / VN_PAGE_SIZE));
+  vnPage = Math.min(vnPage, pages - 1);
+  const from = vnPage * VN_PAGE_SIZE, page = vnRows.slice(from, from + VN_PAGE_SIZE);
+  $("#vn-count").innerHTML = vnRows.length ? "Showing <b>" + (from + 1) + "–" + (from + page.length) + "</b> of <b>" + vnRows.length + "</b> CVEs" + (vnRows.length !== scoped.length ? ' <span class="rw-dim">· ' + scoped.length + " in period</span>" : "") : "";
+  $("#vn-pager").innerHTML = pages > 1
+    ? '<button type="button" class="btn btn-secondary" data-vpage="-1"' + (vnPage ? "" : " disabled") + ' aria-label="Previous page">‹</button><span class="rw-dim">Page ' + (vnPage + 1) + " of " + pages + '</span><button type="button" class="btn btn-secondary" data-vpage="1"' + (vnPage < pages - 1 ? "" : " disabled") + ' aria-label="Next page">›</button>'
     : "";
-  const list = visibleVulns();
-  renderVulnMatrix(list);
-  if (!list.length){ el.innerHTML = '<tr><td colspan="7" class="empty">No vulnerabilities match this view.</td></tr>'; return; }
-  el.innerHTML = list.slice(0, 200).map(v => {
-    const cls = cvssClass(v.cvssScore);
-    const ecls = epssClass(v.epss);
-    return "<tr" + (cls === "cvss-critical" ? ' class="row-critical"' : "") + ">" +
-      '<td data-label="CVE"><a href="' + esc(v.link) + '" target="_blank" rel="noopener">' + esc(v.cveId) + "</a>" +
-        (v.desc ? '<div class="text-muted" style="font-size:11.5px;margin-top:2px">' + esc(v.desc) + "</div>" : "") +
-      "</td>" +
-      '<td data-label="CVSS">' + (v.cvssScore != null ? '<span class="cvss-badge ' + cls + '">' + v.cvssScore.toFixed(1) + "</span>" : '<span class="text-muted">—</span>') + "</td>" +
-      '<td data-label="EPSS">' + (v.epss != null ? '<span class="cvss-badge ' + ecls + '" title="' + (v.epssPercentile != null ? (v.epssPercentile*100).toFixed(0) + "th percentile" : "") + '">' + (v.epss*100).toFixed(1) + "%</span>" : '<span class="text-muted">—</span>') + "</td>" +
-      '<td data-label="WAF">' + (v.waf ? '<span class="wafdot" title="WAF/virtual-patch mitigable class (SQLi, XSS, RCE, SSRF, path traversal, deserialization, etc.)">🛡</span>' : "") + "</td>" +
-      '<td data-label="Vendor / Product" class="text-muted">' + esc([v.vendor, v.product].filter(Boolean).join(" ") || "—") + "</td>" +
-      '<td data-label="Status">' + (v.kev ? '<span class="tag tag-accent">Exploited (KEV)</span>' : '<span class="tag tag-outline">Tracked</span>') + "</td>" +
-      '<td data-label="Published / Added" class="text-muted">' + (v.date ? esc(v.date.toISOString().slice(0,10)) : "—") + "</td>" +
+  const covEl = $("#vuln-cov");
+  if (covEl){
+    const noProd = vulnItems.filter(v => !vnProducts(v).some(p => p.src !== "inferred")).length;
+    covEl.textContent = vulnItems.length
+      ? "Retained: " + vulnItems.length + " CVEs. Every KEV entry added in the last year is kept, then likely-exploited CVEs, then CVSS 9+, then the newest. NVD's feed here covers CVSS 7+ published in the last two days of each run, so older lower-severity CVEs are not tracked. " +
+        noProd + " have no structured product data yet; KEV and GitHub-only CVEs are filled from NVD a few at a time."
+      : "";
+  }
+  if (chartVulnMatrixInst || ($("#vn-analysis") && $("#vn-analysis").open)) renderVulnMatrix(vnRows);
+  if (!page.length){ el.innerHTML = '<tr><td colspan="7" class="empty">No CVEs match this view' + (vnDays ? " — try a longer period." : ".") + "</td></tr>"; return; }
+  const assess = loadVnAssess();
+  el.innerHTML = page.map(v => {
+    const pr = vulnPriority(v), fx = vnFixInfo(v), ed = vnEdge(v), prod = vnProductLabel(v), inferred = vnProducts(v)[0] && vnProducts(v)[0].src === "inferred";
+    const a = assess[v.cveId];
+    return '<tr data-cve="' + esc(v.cveId) + '"' + (pr.watched ? ' class="rw-watched"' : "") + ">" +
+      '<td data-label="Vulnerability"><button type="button" class="rw-org vn-cve" data-cve="' + esc(v.cveId) + '">' + esc(v.cveId) + "</button>" +
+        (a && a.status ? ' <span class="tag tag-neutral" title="Your assessment">' + esc(VN_STATUS[a.status]) + "</span>" : "") +
+        '<div class="vn-title">' + esc(vnShortTitle(v)) + "</div>" +
+        '<div class="vn-prod">' + (prod ? esc(prod) + (inferred ? ' <span class="rw-dim" title="Pattern-matched from the description, not a structured field">· inferred</span>' : "") : '<span class="rw-dim">Product not yet mapped</span>') + "</div></td>" +
+      '<td data-label="Priority"><span class="vn-tier vn-t' + pr.tier + '">' + esc(pr.label) + "</span>" +
+        (pr.reasons.length ? '<div class="vn-reasons">' + pr.reasons.slice(0, 2).map(r => esc(r.text)).join("<br>") + (pr.reasons.length > 2 ? ' <span class="rw-dim">+' + (pr.reasons.length - 2) + "</span>" : "") + "</div>" : "") + "</td>" +
+      '<td data-label="CVSS">' + cvssCell(v) + "</td>" +
+      '<td data-label="EPSS">' + epssCell(v) + "</td>" +
+      '<td data-label="Exploitation">' + exploitCell(v) + "</td>" +
+      '<td data-label="Fix"><span class="vn-fix vn-fix-' + fx.cls + '">' + esc(fx.text) + "</span></td>" +
+      '<td data-label="Edge"><span class="vn-edge vn-edge-' + ed.cls + '" title="' + esc(ed.why) + '">' + esc(VN_EDGE[ed.cls]) + "</span>" +
+        (a && a.edge ? '<div class="vn-sub">' + (a.edge === "validated" ? "Validated here" : "Not effective here") + "</div>" : "") + "</td>" +
     "</tr>";
   }).join("");
+}
+function renderVnFresh(){
+  const el = $("#vn-fresh");
+  if (!el) return;
+  const st = DATA.sourceStatus || {};
+  const bad = ["NVD (High/Critical)", "GitHub Advisories", "CISA KEV", "EPSS"].filter(n => st[n] && !st[n].ok);
+  const epssDay = vulnItems.map(v => v.epssDate).filter(Boolean).sort().pop();
+  el.innerHTML = [
+    DATA.vulnGenerated ? "Sources checked " + esc(relTime(DATA.vulnGenerated)) + " · every 10 min" : "",
+    epssDay ? "EPSS scores dated " + esc(epssDay) : "",
+    st["NVD backfill"] ? "NVD backfill: " + (st["NVD backfill"].ok ? st["NVD backfill"].count + " CVEs this run" : "failed") : "",
+    bad.length ? '<span class="rw-warn">Failed this run: ' + esc(bad.join(", ")) + "</span>" : ""
+  ].filter(Boolean).join(" · ");
+}
+function renderVnKpis(scoped){
+  const el = $("#vn-kpis");
+  if (!el) return;
+  const kev = scoped.filter(v => v.kev);
+  const kevDays = vnDays || 7;
+  const newKev = vulnItems.filter(v => { const t = vnDates(v).kev; return v.kev && t != null && t >= Date.now() - kevDays * 86400000; });
+  const watched = vnWatch.length ? scoped.filter(v => vnWatchMatches(v).length) : null;
+  const noProd = scoped.filter(v => !vnProducts(v).some(p => p.src !== "inferred")).length, noCvss = scoped.filter(v => v.cvssScore == null).length;
+  const tile = (label, value, sub, extra) => '<div class="kpi"><div class="l">' + esc(label) + '</div><div class="v">' + value + '</div><div class="s">' + sub + "</div>" + (extra || "") + "</div>";
+  el.innerHTML =
+    tile("Known exploited", String(kev.length), "CISA KEV entries in this view · " + kev.filter(v => vxOf(v).kevRansomware).length + " with ransomware use") +
+    tile("Newly added to KEV", String(newKev.length), "Last " + kevDays + " days" + (newKev.length ? ' · <button type="button" class="btn btn-ghost" data-vf-go="kev">Review</button>' : "")) +
+    (watched === null
+      ? tile("Watched-product matches", "—", '<button type="button" class="btn btn-ghost vn-watch-open">Choose products to watch</button>')
+      : tile("Watched-product matches", String(watched.length), (watched.length ? '<button type="button" class="btn btn-ghost" data-vf-go="watch">Show matches</button> · ' : "") + "product name only, not your version")) +
+    tile("Missing enrichment", String(noProd), "No structured product · " + noCvss + " without CVSS");
+}
+function renderVnKev(scoped){
+  const el = $("#vn-kev");
+  if (!el) return;
+  const kev = scoped.filter(v => v.kev).sort((a, b) => (vnDates(b).kev || 0) - (vnDates(a).kev || 0));
+  if (!kev.length){ el.innerHTML = '<div class="vn-kev-head"><b>Known exploited</b><span class="rw-dim">No CISA KEV additions in this period.</span></div>'; return; }
+  const today = Date.now();
+  el.innerHTML = '<div class="vn-kev-head"><b>Known exploited: review regardless of EPSS</b><span class="rw-dim">' + kev.length + " in this period. EPSS and CVSS don't lower the priority of a CVE that is already being exploited.</span></div>" +
+    '<div class="vn-kev-list">' + kev.slice(0, 6).map(v => {
+      const vx = vxOf(v), due = vnTime(vx.kevDue), w = vnWatchMatches(v).length;
+      return '<button type="button" class="vn-kev-item vn-cve" data-cve="' + esc(v.cveId) + '">' +
+        '<span class="vn-kev-id">' + esc(v.cveId) + (w ? ' <span class="tag tag-accent">Watched</span>' : "") + "</span>" +
+        '<span class="vn-kev-prod">' + esc(vnProductLabel(v) || vnShortTitle(v)) + "</span>" +
+        '<span class="vn-sub">Added ' + esc(vx.kevAdded || fmtIsoDay(vnDates(v).kev)) + (due ? " · CISA due " + esc(vx.kevDue) + (due < today ? " (passed)" : "") : "") + (vx.kevRansomware ? " · ransomware use" : "") + "</span></button>";
+    }).join("") + "</div>" +
+    (kev.length > 6 ? '<button type="button" class="btn btn-ghost" data-vf-go="kev">Show all ' + kev.length + " in the queue</button>" : "");
+}
+function renderVnChanges(){
+  const el = $("#vn-changes");
+  if (!el) return;
+  const days = vnDays || 7, from = Date.now() - days * 86400000;
+  $("#vn-changes-sub").textContent = "Last " + days + " days · from source timestamps; record contents aren't compared between runs yet";
+  const ev = [];
+  vulnItems.forEach(v => {
+    const d = vnDates(v), pr = vulnPriority(v);
+    if (v.kev && d.kev && d.kev >= from) ev.push({ t: d.kev, kind: "Added to CISA KEV", v, hot: true });
+    else if (d.modified && d.modified >= from && (!d.published || d.modified - d.published > 2 * 86400000) && (pr.tier === 1 || pr.watched)) ev.push({ t: d.modified, kind: "Record updated", v });
+    // A PoC flag alone is common on small web-app CVEs, so new arrivals only list here when they matter.
+    else if (d.seen && d.seen >= from && !v.kev && (pr.watched || (v.epss != null && v.epss >= EPSS_LIKELY))) ev.push({ t: d.seen, kind: pr.watched ? "Newly tracked · watched" : "Newly tracked · EPSS " + (v.epss * 100).toFixed(0) + "%", v });
+  });
+  ev.sort((a, b) => b.t - a.t);
+  el.innerHTML = ev.length ? ev.slice(0, 15).map(e =>
+    '<div class="rw-signal vn-change"><span class="vn-change-kind' + (e.hot ? " hot" : "") + '">' + esc(e.kind) + "</span>" +
+    '<button type="button" class="rw-org rw-inline vn-cve" data-cve="' + esc(e.v.cveId) + '">' + esc(e.v.cveId) + "</button> " +
+    '<span class="vn-change-what">' + esc(vnProductLabel(e.v) || vnShortTitle(e.v)) + '</span><span class="rw-dim vn-change-t">' + esc(fmtIsoDay(e.t)) + "</span></div>"
+  ).join("") : '<div class="empty">No KEV additions, updates to exploited or watched CVEs, or new CVEs with EPSS ≥ 10% in the last ' + days + " days.</div>";
+}
+
+// --- CVE drawer ---
+const VN_SRC_LABEL = { CNA: "CVE record (CNA)", "NVD CPE": "NVD CPE", GitHub: "GitHub advisory", "CISA KEV": "CISA KEV (no versions)", inferred: "Inferred from description — unverified" };
+function vnVector(vec){
+  const m = {}; String(vec || "").split("/").forEach(p => { const [k, val] = p.split(":"); if (k && val) m[k] = val; });
+  return m;
+}
+function vnRefList(urls){ return (urls || []).map(u => '<li><a href="' + esc(u) + '" target="_blank" rel="noopener">' + esc(u.replace(/^https:\/\//, "").slice(0, 80)) + "</a></li>").join(""); }
+function openVuln(id){
+  const v = vulnItems.find(x => x.cveId === id);
+  if (!v) return;
+  const vx = vxOf(v), pr = vulnPriority(v), ed = vnEdge(v), d = vnDates(v), vec = vnVector(vx.vec), refs = vx.refs || {};
+  const a = loadVnAssess()[id] || {};
+  const related = allItems.filter(i => i.src !== "NVD" && i.src !== "GitHub Advisories" && ((i.title || "") + " " + (i.desc || "")).toUpperCase().includes(id)).slice(0, 6);
+  const prods = vnProducts(v);
+  const opt = (map, cur) => Object.entries(map).map(([k, l]) => '<option value="' + k + '"' + (k === (cur || "") ? " selected" : "") + ">" + esc(l) + "</option>").join("");
+  const prereq = [vec.AV && ({ N: "Network", A: "Adjacent network", L: "Local", P: "Physical" }[vec.AV] + " attack vector"),
+    vec.PR && ({ N: "no privileges", L: "low privileges", H: "high privileges" }[vec.PR] + " required"),
+    vec.UI && ({ N: "no user interaction", R: "user interaction required", P: "passive user interaction", A: "active user interaction" }[vec.UI]),
+    vec.AC === "H" || vec.AT === "P" ? "special conditions required" : ""].filter(Boolean);
+  openDrawer("CVE · " + pr.label, id,
+    (String(v.desc || "").includes(vnShortTitle(v).replace(/…$/, "")) ? "" : '<p class="rw-desc"><b>' + esc(vnShortTitle(v)) + "</b></p>") +
+    (pr.reasons.length ? '<ul class="vn-why">' + pr.reasons.map(r => '<li class="' + (r.hot ? "hot" : r.watch ? "watch" : "") + '">' + esc(r.text) + "</li>").join("") + "</ul>" : '<p class="rw-dim">No exploitation or severity signal beyond being tracked.</p>') +
+    (v.desc ? '<p class="rw-desc">' + esc(String(v.desc).replace(/^CVSS [\d.]+\. |^Severity: \w+\. /, "")) + (String(v.desc).length >= 280 ? " …" : "") + '</p>' : "") +
+    '<p class="rw-links"><a href="https://nvd.nist.gov/vuln/detail/' + esc(id) + '" target="_blank" rel="noopener">NVD record</a>' + (v.link && !/nvd\.nist/.test(v.link) ? ' · <a href="' + esc(v.link) + '" target="_blank" rel="noopener">Source advisory</a>' : "") + ' · <a href="https://www.cve.org/CVERecord?id=' + esc(id) + '" target="_blank" rel="noopener">CVE.org</a></p>' +
+
+    '<h4 class="rw-h">Affected products</h4>' + (prods.length
+      ? '<ul class="rw-ev">' + prods.map(p => "<li><b>" + esc(vnProdName(p)) + "</b>" +
+          (p.versions ? '<div class="vn-sub">Affected: <span class="mono">' + esc(p.versions) + "</span></div>" : "") +
+          (p.fixed ? '<div class="vn-sub">Fixed: <span class="mono">' + esc(p.fixed) + "</span></div>" : "") +
+          '<div class="rw-dnote">Source: ' + esc(VN_SRC_LABEL[p.src] || p.src) + ' · <button type="button" class="btn btn-ghost vn-watch-add" data-term="' + esc(vnProdName(p)) + '">Watch ' + esc(vnProdName(p)) + "</button></div></li>").join("") + "</ul>" +
+        (vnWatchMatches(v).length ? '<p class="rw-dnote">Matches your watched products by name. Whether your installed version is affected isn\'t checked.</p>' : "")
+      : '<p class="rw-dim">Product not yet mapped by any source. NVD analysis often adds it within days.</p>') +
+
+    '<h4 class="rw-h">Exploitation evidence</h4><ul class="rw-ev">' +
+      (v.kev ? '<li><span class="tag vn-kev-tag">CISA KEV</span> Added ' + esc(vx.kevAdded || fmtIsoDay(d.kev)) + (vx.kevDue ? " · due " + esc(vx.kevDue) + ' <span class="rw-dim">(US federal deadline)</span>' : "") + (vx.kevRansomware ? " · known ransomware use" : "") +
+        (vx.kevNotes ? ' · <a href="' + esc(vx.kevNotes) + '" target="_blank" rel="noopener">CISA notes</a>' : "") + "</li>" : "") +
+      (vx.ssvc ? "<li>CISA SSVC exploitation: <b>" + esc(vx.ssvc) + "</b></li>" : "") +
+      (vx.maturity ? "<li>CVSS 4.0 exploit maturity (from the CNA): <b>" + esc(vx.maturity.toLowerCase().replace(/_/g, " ")) + "</b></li>" : "") +
+      (refs.exploit ? "<li>Exploit references (NVD tag):<ul>" + vnRefList(refs.exploit) + "</ul></li>" : "") +
+      (!v.kev && !vx.ssvc && !vx.maturity && !refs.exploit ? '<li class="rw-dim">No exploitation evidence collected. Absence here is not evidence of safety.</li>' : "") +
+      (v.epss != null ? "<li>EPSS <b>" + (v.epss * 100).toFixed(2) + "%</b> probability of exploitation activity in the next 30 days" + (v.epssPercentile != null ? " · " + Math.round(v.epssPercentile * 100) + "th percentile" : "") + (v.epssDate ? " · scored " + esc(v.epssDate) : "") +
+        '<div class="rw-dnote">A population-level estimate from FIRST, not a measure of whether your organization will be targeted or compromised.</div></li>' : "") +
+    "</ul>" +
+
+    '<h4 class="rw-h">Remediation</h4><ul class="rw-ev">' +
+      (prods.some(p => p.fixed) ? "<li>Fixed versions: " + prods.filter(p => p.fixed).map(p => esc(p.product) + ' <span class="mono">' + esc(p.fixed) + "</span>").join("; ") + "</li>" : "") +
+      (vx.kevAction ? "<li>CISA required action: " + esc(vx.kevAction) + "</li>" : "") +
+      (refs.patch ? "<li>Patches:<ul>" + vnRefList(refs.patch) + "</ul></li>" : "") +
+      (refs.advisory ? "<li>Vendor advisories:<ul>" + vnRefList(refs.advisory) + "</ul></li>" : "") +
+      (refs.mitigation ? "<li>Mitigations:<ul>" + vnRefList(refs.mitigation) + "</ul></li>" : "") +
+      (refs.thirdParty ? "<li>Third-party advisories:<ul>" + vnRefList(refs.thirdParty) + "</ul></li>" : "") +
+      (!prods.some(p => p.fixed) && !vx.kevAction && !refs.patch && !refs.advisory && !refs.mitigation ? '<li class="rw-dim">No fix or advisory stated by the sources yet.</li>' : "") +
+      (refs.other ? '<li>Other references:<ul>' + vnRefList(refs.other) + "</ul></li>" : "") +
+    "</ul>" +
+
+    '<h4 class="rw-h">Edge / WAF applicability</h4>' +
+    '<p><span class="vn-edge vn-edge-' + ed.cls + '">' + esc(VN_EDGE[ed.cls]) + "</span> " + esc(ed.why) + (ed.cls === "potential" ? " — preliminary classification." : "") + "</p>" +
+    (ed.cls === "potential" || ed.cls === "documented" ? '<dl class="rw-dl">' +
+      dRow("Protocol", "HTTP(S), assumed from the weakness class") +
+      dRow("Endpoint", ed.path ? '<span class="mono">' + esc(ed.path) + "</span>" : '<span class="rw-dim">Not stated</span>') +
+      dRow("Parameter", ed.param ? '<span class="mono">' + esc(ed.param) + "</span>" : '<span class="rw-dim">Not stated</span>') +
+      (ed.component ? dRow("Component", esc(ed.component)) : "") +
+      dRow("Prerequisites", prereq.length ? esc(prereq.join(", ")) : '<span class="rw-dim">No CVSS vector</span>') +
+      dRow("Rule reference", ed.ref ? '<a href="' + esc(ed.ref) + '" target="_blank" rel="noopener">' + esc(ed.ref.replace(/^https:\/\//, "").slice(0, 60)) + "</a>" : '<span class="rw-dim">None found in the references</span>') +
+    "</dl>" + '<p class="rw-dnote">Limits: a signature rule reduces exposure but doesn\'t fix the flaw. Encodings, authenticated paths, non-standard ports and traffic that bypasses the edge can all evade it. Patch regardless.</p>' : "") +
+
+    '<h4 class="rw-h">Scores and dates</h4><dl class="rw-dl">' +
+      dRow("CVSS", v.cvssScore != null ? "<b>" + v.cvssScore.toFixed(1) + "</b> · v" + esc(vx.cvssVer || "?") + " · scored by " + esc(vx.cvssSrc || "unknown") : '<span class="rw-dim">Not scored yet</span>') +
+      (vx.vec ? dRow("Vector", '<span class="mono vn-vec">' + esc(vx.vec.replace(/\/[A-Z]{1,3}:X/g, "")) + "</span>") : "") +
+      (vx.cwes && vx.cwes.length ? dRow("Weakness", vx.cwes.map(c => '<a href="https://cwe.mitre.org/data/definitions/' + esc(c.slice(4)) + '.html" target="_blank" rel="noopener">' + esc(c) + "</a>").join(", ")) : "") +
+      dRow("Published", d.published ? '<span class="mono">' + esc(fmtIsoDay(d.published)) + "</span>" : '<span class="rw-dim">Not known here</span>') +
+      dRow("Last updated", d.modified ? '<span class="mono">' + esc(fmtIsoDay(d.modified)) + "</span>" : '<span class="rw-dim">Not known here</span>') +
+      (v.kev ? dRow("Added to KEV", '<span class="mono">' + esc(vx.kevAdded || fmtIsoDay(d.kev)) + "</span>") : "") +
+      dRow("First seen here", d.seen ? '<span class="mono">' + esc(fmtIsoDay(d.seen)) + "</span>" : '<span class="rw-dim">Before tracking began</span>') +
+      dRow("NVD status", vx.status ? esc(vx.status) + (vx.nvdAt ? ' <span class="rw-dim">· read ' + esc(fmtIsoDay(vnTime(vx.nvdAt))) + "</span>" : "") : '<span class="rw-dim">Not read from NVD yet</span>') +
+    "</dl>" +
+
+    (related.length ? '<h4 class="rw-h">Related reporting</h4><ul class="rw-ev">' + related.map(i => '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + '</a><span class="rw-dnote">' + esc(i.src) + (i.date ? " · " + esc(fmtDate(i.date)) : "") + "</span></li>").join("") + "</ul>" : "") +
+
+    '<h4 class="rw-h">Your assessment</h4>' +
+    '<label class="rw-lbl" for="vn-a-status">Status</label><select class="input" id="vn-a-status" data-cve="' + esc(id) + '">' + opt(VN_STATUS, a.status) + "</select>" +
+    '<label class="rw-lbl" for="vn-a-edge">Edge rule</label><select class="input" id="vn-a-edge" data-cve="' + esc(id) + '">' + opt(VN_EDGE_ASSESS, a.edge) + "</select>" +
+    '<label class="rw-lbl" for="vn-a-notes">Notes</label><textarea class="input rw-notes" id="vn-a-notes" rows="3" data-cve="' + esc(id) + '" placeholder="Owner, exposure, ticket…">' + esc(a.notes || "") + "</textarea>" +
+    '<p class="rw-dnote">Saved in this browser only.</p>'
+  );
+}
+function saveVnAssess(id, key, val){
+  const all = loadVnAssess(), cur = Object.assign({}, all[id]);
+  if (val) cur[key] = val; else delete cur[key];
+  if (Object.keys(cur).length) all[id] = cur; else delete all[id];
+  try { localStorage.setItem("apjti.vulnAssess", JSON.stringify(all)); } catch (_){}
+}
+function openVnWatch(){
+  openDrawer("Watched products", "Your technology stack",
+    '<p class="rw-dnote">One product or vendor per line, e.g. <span class="mono">FortiOS</span>, <span class="mono">Confluence</span>, <span class="mono">Microsoft Exchange</span>. Matches are by name against each CVE\'s products. They don\'t confirm that your version is affected; the CVE panel shows the affected ranges. Saved in this browser only.</p>' +
+    '<textarea class="input" id="vn-w-list" rows="10" placeholder="FortiOS&#10;Citrix NetScaler&#10;nginx">' + esc(vnWatch.join("\n")) + "</textarea>" +
+    '<p class="rw-dnote" id="vn-w-msg" aria-live="polite"></p><p><button type="button" class="btn btn-primary" id="vn-w-save">Save</button></p>');
+}
+function setVnWatch(list){
+  vnWatch = [...new Set(list.map(s => s.trim()).filter(Boolean))];
+  try { localStorage.setItem("apjti.vulnWatch", JSON.stringify(vnWatch)); } catch (_){}
+  renderVulnerabilities();
+}
+function wireVulns(){
+  const sec = $("#vulnerabilities");
+  if (!sec) return;
+  let t = null;
+  $("#vuln-search").addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { vulnSearch = e.target.value.trim().toLowerCase(); vnPage = 0; renderVulnerabilities(); }, 150); });
+  $("#vn-sort").addEventListener("change", e => { vnSort = e.target.value; vnPage = 0; renderVulnerabilities(); });
+  $("#vn-date-field").addEventListener("change", e => { vnDateField = e.target.value; try { localStorage.setItem("apjti.vnDateField", vnDateField); } catch (_){} vnPage = 0; renderVulnerabilities(); });
+  $("#vn-watch-btn").addEventListener("click", openVnWatch);
+  const analysis = $("#vn-analysis");
+  if (analysis) analysis.addEventListener("toggle", () => { if (analysis.open) renderVulnMatrix(vnRows); });
+  const onClick = e => {
+    const b = e.target.closest("button, tr[data-cve]");
+    if (!b) return;
+    if (b.matches("[data-vf]")){ vulnFilter = b.dataset.vf; try { localStorage.setItem("apjti.vulnFilter", vulnFilter); } catch (_){} vnPage = 0; renderVulnerabilities(); return; }
+    if (b.matches("[data-vf-go]")){ closeDrawer(); vulnFilter = b.dataset.vfGo; vnPage = 0; renderVulnerabilities(); $(".vn-filters").scrollIntoView({ block: "start" }); return; }
+    if (b.matches("[data-vd]")){ vnDays = parseInt(b.dataset.vd, 10); try { localStorage.setItem("apjti.vnDays", String(vnDays)); } catch (_){} vnPage = 0; renderVulnerabilities(); return; }
+    if (b.matches("[data-vpage]")){ vnPage += parseInt(b.dataset.vpage, 10); renderVulnerabilities(); $("#vn-count").scrollIntoView({ block: "nearest" }); return; }
+    if (b.matches(".vn-watch-open")){ openVnWatch(); return; }
+    if (b.id === "vn-w-save"){ setVnWatch($("#vn-w-list").value.split("\n")); $("#vn-w-msg").textContent = "Saved · " + vnWatch.length + " product" + (vnWatch.length === 1 ? "" : "s") + "."; return; }
+    if (b.matches(".vn-watch-add")){ setVnWatch([...vnWatch, b.dataset.term]); b.textContent = "Watching " + b.dataset.term; b.disabled = true; return; }
+    if (b.matches(".vn-cve") || (b.matches("tr[data-cve]") && !e.target.closest("a"))){ openVuln(b.dataset.cve); return; }
+  };
+  sec.addEventListener("click", onClick);
+  $("#rw-drawer").addEventListener("click", onClick);
+  $("#rw-drawer").addEventListener("change", e => {
+    if (e.target.id === "vn-a-status") saveVnAssess(e.target.dataset.cve, "status", e.target.value);
+    else if (e.target.id === "vn-a-edge") saveVnAssess(e.target.dataset.cve, "edge", e.target.value);
+    else return;
+    renderVulnerabilities();
+  });
+  $("#rw-drawer").addEventListener("input", e => { if (e.target.id === "vn-a-notes") saveVnAssess(e.target.dataset.cve, "notes", e.target.value.trim() ? e.target.value : ""); });
 }
 
 /* ---------------- Vulnerabilities: CVSS × EPSS triage matrix ---------------- */
@@ -1296,7 +1665,7 @@ function renderVulnerabilities(){
 // is under 1%, and a linear axis would pile them all onto the floor. Colours come from the theme
 // tokens, so the chart is re-rendered on theme toggle (wireThemeToggle) and resized on tab open.
 const EPSS_MIN = 0.0001;
-const MATRIX_CVSS_LINE = 9, MATRIX_EPSS_LINE = 0.1; // CVSS "critical"; FIRST.org's "elevated" EPSS
+const MATRIX_CVSS_LINE = 9, MATRIX_EPSS_LINE = EPSS_LIKELY; // CVSS "critical"; = EPSS_LIKELY, the priority tiers' line
 // CVEs with EPSS but no CVSS go in a lane left of the CVSS axis instead of being dropped: CISA KEV
 // entries arrive without a CVSS score, so without this lane the chart would hide every
 // actively-exploited CVE — the ones it matters most to see. Points are spread across the lane by a
@@ -1354,14 +1723,15 @@ function renderVulnMatrix(list){
   if (hasLane) pts.forEach(p => { if (p.v.cvssScore == null) p.x = lane[0] + (p.x - MATRIX_LANE[0]) / (MATRIX_LANE[1] - MATRIX_LANE[0]) * laneW; });
   const laneHot = pts.filter(p => p.v.cvssScore == null && p.v.epss >= MATRIX_EPSS_LINE).length;
   if (note) note.textContent = pts.length
-    ? pts.length + " plotted of " + list.length + " in view (needs an EPSS score) · " + hot + " in the severe-and-likely corner" +
-      (laneHot ? " · " + laneHot + " more above 10% EPSS with no CVSS" : "")
+    ? pts.length + " plotted of " + list.length + " in view (needs an EPSS score) · " + hot + " in the shaded corner" +
+      (laneHot ? " · " + laneHot + " more above 10% EPSS with no CVSS" : "") +
+      (pts.some(p => p.v.kev) ? " · red points are known exploited wherever they sit" : "")
     : "Nothing to plot — no CVE in this view has an EPSS score.";
   const red = cssToken("--lvl-red"), accent = cssToken("--color-accent"), text = cssToken("--color-text"),
     muted = cssToken("--color-neutral-700"), line = cssToken("--color-divider"), mono = "'IBM Plex Mono', ui-monospace, monospace";
   const datasets = [
-    { label: "Exploited (CISA KEV)", data: pts.filter(p => p.v.kev), backgroundColor: hexA(red, .8), borderColor: red, pointRadius: 5, pointHoverRadius: 7 },
-    { label: "Tracked", data: pts.filter(p => !p.v.kev), backgroundColor: hexA(accent, .45), borderColor: accent, pointRadius: 3.5, pointHoverRadius: 6 }
+    { label: "Known exploited (CISA KEV)", data: pts.filter(p => p.v.kev), backgroundColor: hexA(red, .8), borderColor: red, pointRadius: 5, pointHoverRadius: 7 },
+    { label: "No known exploitation", data: pts.filter(p => !p.v.kev), backgroundColor: hexA(accent, .45), borderColor: accent, pointRadius: 3.5, pointHoverRadius: 6 }
   ];
   const tick = { color: muted, font: { family: mono, size: 10 } };
   const options = {
@@ -1372,10 +1742,16 @@ function renderVulnMatrix(list){
         backgroundColor: cssToken("--color-panel"), borderColor: line, borderWidth: 1, titleColor: text, bodyColor: muted,
         titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 10.5 }, padding: 10, cornerRadius: 8,
         callbacks: {
-          title: items => items[0].raw.v.cveId + (items[0].raw.v.kev ? "  · KEV" : ""),
+          title: items => items[0].raw.v.cveId + (items[0].raw.v.kev ? "  · known exploited (KEV)" : ""),
           label: item => {
             const v = item.raw.v;
-            return ["CVSS " + (v.cvssScore != null ? v.cvssScore.toFixed(1) : "n/a") + " · EPSS " + (v.epss * 100).toFixed(2) + "%", [v.vendor, v.product].filter(Boolean).join(" ").slice(0, 60)].filter(Boolean);
+            return [
+              "CVSS " + (v.cvssScore != null ? v.cvssScore.toFixed(1) : "not scored"),
+              "EPSS probability " + (v.epss * 100).toFixed(2) + "% (next 30 days)",
+              v.epssPercentile != null ? "EPSS percentile " + Math.round(v.epssPercentile * 100) + "th" : "",
+              v.epssDate ? "EPSS scored " + v.epssDate : "",
+              vnProductLabel(v).slice(0, 60)
+            ].filter(Boolean);
           }
         }
       }
@@ -1384,18 +1760,14 @@ function renderVulnMatrix(list){
       x: { min: hasLane ? lane[0] : cvssFloor, max: 10, title: { display: true, text: "CVSS severity →", color: muted, font: { family: mono, size: 10 } },
         afterBuildTicks: ax => { ax.ticks = Array.from({ length: 11 - cvssFloor }, (_, i) => ({ value: cvssFloor + i })); },
         ticks: { ...tick }, grid: { color: hexA(line, .6) }, border: { display: false } },
-      y: { type: "logarithmic", min: EPSS_MIN, max: 1, title: { display: true, text: "EPSS exploitation probability →", color: muted, font: { family: mono, size: 10 } },
+      y: { type: "logarithmic", min: EPSS_MIN, max: 1, title: { display: true, text: "EPSS probability (log scale) →", color: muted, font: { family: mono, size: 10 } },
         ticks: { ...tick, callback: val => [0.0001, 0.001, 0.01, 0.1, 1].includes(val) ? (val * 100) + "%" : null }, grid: { color: hexA(line, .6) }, border: { display: false } }
     },
     onHover: (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : "default"; },
-    // Clicking a point narrows the table to that CVE via the existing search box.
+    // Clicking a point opens that CVE's panel.
     onClick: (e, els, chart) => {
       if (!els.length) return;
-      const v = chart.data.datasets[els[0].datasetIndex].data[els[0].index].v;
-      const input = $("#vuln-search");
-      if (input) input.value = v.cveId;
-      vulnSearch = v.cveId.toLowerCase();
-      renderVulnerabilities();
+      openVuln(chart.data.datasets[els[0].datasetIndex].data[els[0].index].v.cveId);
     }
   };
   // Quadrant guides: CVSS 9 / EPSS 10%, with the severe-and-likely corner shaded. The plugin is bound
@@ -1420,7 +1792,7 @@ function renderVulnMatrix(list){
       ctx.strokeStyle = hexA(red, .45); ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(qx, a.top); ctx.lineTo(qx, a.bottom); ctx.moveTo(a.left, qy); ctx.lineTo(a.right, qy); ctx.stroke();
       ctx.setLineDash([]); ctx.fillStyle = hexA(red, .85); ctx.font = "600 10px " + mono; ctx.textAlign = "right"; ctx.textBaseline = "top";
-      ctx.fillText("SEVERE + LIKELY", a.right - 6, a.top + 6);
+      ctx.fillText("CVSS ≥ 9 · EPSS ≥ 10%", a.right - 6, a.top + 6);
       ctx.restore();
     }
   };
@@ -2612,7 +2984,7 @@ function wireThemeToggle(){
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("apjti.theme", next); } catch (_){}
     syncThemeToggle();
-    if (chartVulnMatrixInst) renderVulnMatrix(visibleVulns()); // reads theme tokens
+    if (chartVulnMatrixInst) renderVulnMatrix(vnRows); // reads theme tokens
     if (rwTrendInst) renderRw(); // trend bar colours are read from theme tokens too
   });
   syncThemeToggle();
@@ -2652,13 +3024,6 @@ function wireActions(){
     localStorage.setItem("apjti.tgFilter", tgFilter);
     renderTelegram();
   }));
-  document.querySelectorAll("[data-vf]").forEach(c => c.addEventListener("click", () => {
-    vulnFilter = c.dataset.vf;
-    localStorage.setItem("apjti.vulnFilter", vulnFilter);
-    renderVulnerabilities();
-  }));
-  const vulnSearchEl = $("#vuln-search");
-  if (vulnSearchEl) vulnSearchEl.addEventListener("input", e => { vulnSearch = e.target.value.toLowerCase(); renderVulnerabilities(); });
   document.querySelectorAll("[data-iocf]").forEach(c => c.addEventListener("click", () => {
     iocFilter = c.dataset.iocf;
     localStorage.setItem("apjti.iocFilter", iocFilter);
@@ -3002,6 +3367,7 @@ async function init(){
   wireActions();
   wireApt();
   wireRw();
+  wireVulns();
   wireIpCheck();
   wireNavToggle();
   wireThemeToggle();

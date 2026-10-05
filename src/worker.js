@@ -103,6 +103,7 @@ const RADAR_L7_DIMENSION = "HTTP_METHOD";
 // Structured JSON sources (not RSS) — same India/APJ/DDoS-AppSec tagging, different fetch/parse shape.
 const GITHUB_ADVISORIES_URL = "https://api.github.com/advisories?per_page=30&sort=published&direction=desc";
 const NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+const VULN_CAP = 400; // all KEV entries (≤100) always fit; see dedupeVulnerabilities()
 const NVD_MIN_CVSS = 7.0; // High/Critical only — NVD's raw firehose is too high-volume/low-relevance otherwise
 const OPENPHISH_URL = "https://openphish.com/feed.txt"; // redirects to the public community feed mirror
 // Must match the second entry in wrangler.toml's [triggers] crons exactly — scheduled() branches on
@@ -450,6 +451,173 @@ function parseItems(xml, srcName){
   return out;
 }
 
+/* ---- CVE enrichment for the Vulnerabilities page ----
+   Every CVE record can carry a `vx` object with what its sources state in structured form, so the
+   page can say where each fact came from instead of guessing:
+     cvssVer/vec/cvssSrc  the CVSS score's version, vector and who scored it (NVD, a CNA, GitHub)
+     products             [{ vendor, product, versions, fixed, src }] — src is "CNA" (the CVE record's
+                          own affected data), "NVD CPE", "GitHub", "CISA KEV", or "inferred" (pattern
+                          match on the description; dropped as soon as any structured source exists)
+     refs                 reference URLs by NVD tag: advisory, patch, exploit, mitigation, thirdParty,
+                          virtualPatch (a WAF vendor's rule/virtual-patch page), other (untagged)
+     maturity / ssvc      CVSS 4.0 exploit maturity (E:) and CISA's SSVC "exploitation" decision point
+     published/modified/status/cna, kevAdded/kevDue/kevAction/kevNotes/kevRansomware, cwes
+     nvdAt                when NVD's record was last read (parseNvdCves() or the backfill)
+     edge                 classifyEdge(): { cls: documented|potential|na|unknown, why, path, param, component }
+   None of it is the user's own assessment — that stays in the browser (see public/app.js). */
+const WAF_CWE_NAME = { "CWE-89": "SQL injection", "CWE-79": "cross-site scripting", "CWE-78": "OS command injection", "CWE-77": "command injection", "CWE-94": "code injection", "CWE-95": "eval injection", "CWE-98": "file inclusion", "CWE-611": "XML external entity", "CWE-918": "server-side request forgery", "CWE-22": "path traversal", "CWE-434": "unrestricted file upload", "CWE-502": "insecure deserialization", "CWE-352": "cross-site request forgery", "CWE-601": "open redirect", "CWE-444": "request smuggling", "CWE-113": "response splitting" };
+// WAF_KW minus "remote code execution": that's an outcome, not a request-shape bug class, and most
+// KEV RCEs are memory corruption an edge rule can't reliably match.
+const RE_EDGE_KW = kwRegex(WAF_KW.filter(k => k !== "remote code execution"));
+const RE_NOT_EDGE = /\bsandbox (?:escape|bypass)|escape (?:the|a|its) sandbox|\blocal (?:user|attacker)s?\b|\blocally\b|physical access|command[- ]line|\bcli\b|privileged (?:user|account|cli)/i;
+const RE_NON_HTTP = /\b(smb|rdp|ssh|snmp|ldap|dns|ntp|mqtt|modbus|telnet|imap|smtp|ftp|bluetooth|usb|kernel|driver|firmware)\b/i;
+const RE_VPATCH_URL = /(cloudflare|akamai|imperva|f5|fortinet|fortiguard|radware|barracuda|fastly|coreruleset|modsecurity)[^ ]*(waf|virtual[-_]?patch|managed[-_]?rule|signature|crs|rule)/i;
+const VX_REF_CAP = 3;
+
+function cvssSourceName(s){
+  s = String(s || "");
+  if (s === "nvd@nist.gov") return "NVD";
+  if (s === "security-advisories@github.com") return "GitHub";
+  if (s.includes("@")) return s.split("@")[1];
+  return s ? "CISA ADP" : "";
+}
+// Prefers v3.1 (what most tools show), then 4.0, 3.0, 2.0; within a version the Primary (NVD) score.
+function nvdCvss(metrics){
+  for (const k of ["cvssMetricV31", "cvssMetricV40", "cvssMetricV30", "cvssMetricV2"]){
+    const arr = (metrics || {})[k];
+    if (!arr || !arr.length) continue;
+    const m = arr.find(x => x.type === "Primary") || arr[0];
+    const d = m.cvssData || {};
+    if (typeof d.baseScore === "number") return { score: d.baseScore, ver: d.version || "", vec: d.vectorString || "", src: cvssSourceName(m.source) };
+  }
+  return null;
+}
+function capList(list, n){ return list.length > n ? list.slice(0, n).join(", ") + " +" + (list.length - n) : list.join(", "); }
+function cnaProducts(affected){
+  const out = new Map();
+  for (const a of affected || []) for (const p of a.affectedData || []){
+    if (!p.product || p.product === "n/a") continue;
+    const key = (p.vendor + "|" + p.product).toLowerCase();
+    if (out.has(key) || out.size >= 4) continue;
+    const vs = p.versions || [];
+    const ranges = vs.filter(v => v.status === "affected").map(v => {
+      const from = v.version && !/^(0|\*|n\/a)$/i.test(v.version) ? v.version : "";
+      if (v.lessThan) return (from ? from + " to " : "") + "< " + v.lessThan;
+      if (v.lessThanOrEqual) return (from ? from + " to " : "") + "≤ " + v.lessThanOrEqual;
+      return from;
+    }).filter(Boolean);
+    const fixed = new Set();
+    vs.forEach(v => {
+      (v.changes || []).forEach(c => { if (c.status === "unaffected" && c.at) fixed.add(c.at); });
+      if (v.status === "affected" && v.lessThan && /\d/.test(v.lessThan)) fixed.add(v.lessThan); // "< 6.5.4" means fixed in 6.5.4
+    });
+    // VulDB-style records list the fixed release as a lone "unaffected" version after the affected ones.
+    const unaff = vs.filter(v => v.status === "unaffected" && !v.lessThan && /\d/.test(v.version || ""));
+    if (!fixed.size && unaff.length === 1 && vs.indexOf(unaff[0]) > 0) fixed.add(unaff[0].version);
+    out.set(key, { vendor: p.vendor && p.vendor !== "n/a" ? p.vendor : "", product: p.product, versions: capList(ranges, 3), fixed: capList([...fixed], 3), src: "CNA" });
+  }
+  return [...out.values()];
+}
+function cpeProducts(configurations){
+  const by = new Map();
+  for (const conf of configurations || []) for (const node of conf.nodes || []) for (const m of node.cpeMatch || []){
+    if (!m.vulnerable) continue;
+    const parts = String(m.criteria || "").split(":");
+    if (parts.length < 6) continue;
+    const vendor = parts[3].replace(/_/g, " "), product = parts[4].replace(/_/g, " ");
+    const key = vendor + "|" + product;
+    if (!by.has(key)){ if (by.size >= 4) continue; by.set(key, { vendor, product, r: [], fixed: new Set() }); }
+    const e = by.get(key);
+    const ver = parts[5] && !/^[*-]$/.test(parts[5]) ? parts[5] : "";
+    const from = m.versionStartIncluding ? m.versionStartIncluding + " to " : m.versionStartExcluding ? "> " + m.versionStartExcluding + " to " : "";
+    if (m.versionEndExcluding){ e.r.push(from + "< " + m.versionEndExcluding); e.fixed.add(m.versionEndExcluding); }
+    else if (m.versionEndIncluding) e.r.push(from + "≤ " + m.versionEndIncluding);
+    else if (ver) e.r.push(ver);
+  }
+  return [...by.values()].map(e => ({ vendor: e.vendor, product: e.product, versions: capList([...new Set(e.r)], 3), fixed: capList([...e.fixed], 3), src: "NVD CPE" }));
+}
+// Last resort, labelled "inferred": the CNA phrasing VulDB and many others use ("…found in Ahsay
+// AhsayCBS up to 10.3.2", "…in Foo Bar before 2.1").
+function inferProduct(desc){
+  const m = /\b(?:found|identified|discovered|detected|exists|was|is) in ([A-Z0-9][\w.+-]*(?: [A-Za-z0-9][\w.+-]*){0,4}?) (up to |before |through |prior to |versions? |v)?(\d[\w.-]*\d|\d)\b/.exec(String(desc || ""));
+  if (!m) return [];
+  const op = (m[2] || "").trim();
+  const versions = /^(up to|through)$/.test(op) ? "≤ " + m[3] : /^(before|prior to)$/.test(op) ? "< " + m[3] : m[3];
+  return [{ vendor: "", product: m[1], versions, fixed: "", src: "inferred" }];
+}
+function inferEndpoint(desc){
+  const s = String(desc || "");
+  const path = /\b(?:of the file|in the file|the file|endpoint|path|URL|route)\s+[`'"]?(\/?[\w.-]+\/[\w./%{}:~-]*|\/?[\w-]+\.(?:php|asp|aspx|jsp|do|action|cgi|html?))\b/i.exec(s);
+  const param = /\bargument\s+[`'"]?([\w\[\].:-]+)/i.exec(s) || /\bparameter\s+[`'"]?([\w\[\].:-]+)/i.exec(s);
+  const comp = /\bcomponent\s+([\w ./-]{2,40}?)(?=[.,]| leads| is| of\b)/i.exec(s);
+  return { path: path ? path[1].replace(/[.,]$/, "") : "", param: param ? param[1] : "", component: comp ? comp[1].trim() : "" };
+}
+function classifyRefs(refs){
+  const out = {};
+  const add = (k, u) => { const l = out[k] || (out[k] = []); if (l.length < VX_REF_CAP && !l.includes(u)) l.push(u); };
+  for (const r of refs || []){
+    const u = typeof r === "string" ? r : r && r.url;
+    if (!/^https:\/\//.test(u || "")) continue;
+    const t = typeof r === "string" ? "" : (r.tags || []).join(" ");
+    if (RE_VPATCH_URL.test(u)) add("virtualPatch", u);
+    if (/Exploit/.test(t)) add("exploit", u);
+    if (/Patch/.test(t) || (!t && /\/commit\/|\/pull\/\d/.test(u))) add("patch", u);
+    if (/Mitigation/.test(t)) add("mitigation", u);
+    if (/Vendor Advisory/.test(t)) add("advisory", u);
+    else if (/Third Party Advisory/.test(t)) add("thirdParty", u);
+    if (!t && !/\/commit\/|\/pull\/\d/.test(u)) add("other", u);
+  }
+  return out;
+}
+// Later (lower-priority) sources only fill gaps; products and refs are unioned.
+function mergeVx(a, b){
+  if (!a) return b ? Object.assign({}, b) : undefined;
+  if (!b) return a;
+  const out = Object.assign({}, b, a);
+  const prods = [...(a.products || []), ...(b.products || [])];
+  const seen = new Set(), structured = prods.some(p => p.src !== "inferred");
+  out.products = prods.filter(p => { const k = (p.vendor + "|" + p.product).toLowerCase(); if (seen.has(k) || (structured && p.src === "inferred")) return false; seen.add(k); return true; }).slice(0, 5);
+  const refs = {};
+  for (const src of [a.refs, b.refs]) for (const [k, l] of Object.entries(src || {})) refs[k] = [...new Set([...(refs[k] || []), ...l])].slice(0, VX_REF_CAP);
+  out.refs = refs;
+  out.cwes = [...new Set([...(a.cwes || []), ...(b.cwes || [])])];
+  if (a.nvdAt || b.nvdAt) out.nvdAt = [a.nvdAt, b.nvdAt].filter(Boolean).sort().pop();
+  return out;
+}
+// Edge (WAF / virtual patch) applicability, from evidence rather than a keyword hit alone:
+//   documented — a WAF vendor's rule / virtual-patch page is among the references
+//   potential  — a request-shape weakness (CWE or description) on a network attack vector; preliminary
+//   na         — the CVSS vector or description says it isn't reachable through a web edge
+//   unknown    — nothing establishes either way
+// "Validated in your environment" is the user's call, recorded in their browser, never here.
+function classifyEdge(rec){
+  const vx = rec.vx || {}, text = (rec.title || "") + " " + (rec.desc || "");
+  const ep = inferEndpoint(rec.desc);
+  const vp = (vx.refs && vx.refs.virtualPatch) || [];
+  if (vp.length) return Object.assign({ cls: "documented", why: "A WAF vendor rule or virtual-patch page is referenced", ref: vp[0] }, ep);
+  const av = /\/AV:([NALP])/.exec(vx.vec || "");
+  if (av && av[1] !== "N") return { cls: "na", why: "CVSS attack vector is " + { A: "adjacent network", L: "local", P: "physical" }[av[1]] + ", so it isn't reached through a web edge" };
+  const ne = RE_NOT_EDGE.exec(text);
+  if (ne) return { cls: "na", why: "Description points to a non-web path (“" + ne[0] + "”)" };
+  const cwe = (vx.cwes || []).find(c => WAF_CWE.has(String(c).toUpperCase()));
+  const kw = cwe ? null : RE_EDGE_KW.exec(text);
+  if (!cwe && !kw) return { cls: "unknown", why: "No web-request weakness class identified" };
+  const np = RE_NON_HTTP.exec(text);
+  if (np) return { cls: "unknown", why: "Web-type weakness, but the description mentions " + np[1] + ", so it may not be HTTP" };
+  return Object.assign({ cls: "potential", why: (cwe ? cwe + " (" + WAF_CWE_NAME[cwe] + ")" : "Description says “" + kw[0] + "”") + (av ? " on a network attack vector" : "; attack vector not scored yet") }, ep);
+}
+// Records stored before `vx` existed get one here, with an inferred product from their description.
+function finalizeVuln(rec){
+  rec.vx = rec.vx || {};
+  if (!(rec.vx.products || []).length){
+    rec.vx.products = rec.vendor || rec.product ? [{ vendor: rec.vendor || "", product: rec.product || "", versions: "", fixed: "", src: "CISA KEV" }] : inferProduct(String(rec.desc || "").replace(/^CVSS [\d.]+\. |^Severity: \w+\. /, ""));
+  }
+  if (!rec.vendor || !rec.product){ const p = rec.vx.products.find(x => x.src !== "inferred"); if (p){ rec.vendor = rec.vendor || p.vendor; rec.product = rec.product || p.product; } }
+  rec.vx.edge = classifyEdge(rec);
+  rec.waf = rec.vx.edge.cls === "potential" || rec.vx.edge.cls === "documented";
+  return rec;
+}
+
 function parseGithubAdvisories(json){
   const list = Array.isArray(json) ? json : [];
   return list.slice(0, 30).map(a => {
@@ -458,37 +626,59 @@ function parseGithubAdvisories(json){
     const d = a.published_at ? new Date(a.published_at) : null;
     const cwes = (a.cwes || []).map(c => c.cwe_id).filter(Boolean);
     const sev = a.cvss_severities || {};
-    const cvssScore = typeof (a.cvss && a.cvss.score) === "number" ? a.cvss.score
-      : typeof (sev.cvss_v4 && sev.cvss_v4.score) === "number" ? sev.cvss_v4.score
-      : typeof (sev.cvss_v3 && sev.cvss_v3.score) === "number" ? sev.cvss_v3.score
-      : null;
+    // An unscored version comes back as { score: 0, vector_string: null } — not a real 0.0.
+    const scored = x => x && typeof x.score === "number" && x.score > 0 ? x : null;
+    const pick = scored(sev.cvss_v3) || scored(sev.cvss_v4) || scored(a.cvss);
+    const cvssScore = pick ? pick.score : null;
+    const vec = pick ? (pick.vector_string || "") : "";
+    const vx = {
+      cvssVer: (/^CVSS:(\d\.\d)/.exec(vec) || [])[1] || "", vec, cvssSrc: pick ? "GitHub" : "",
+      products: (a.vulnerabilities || []).filter(x => x.package && x.package.name).slice(0, 4).map(x => ({
+        vendor: x.package.ecosystem || "", product: x.package.name, versions: x.vulnerable_version_range || "", fixed: x.first_patched_version || "", src: "GitHub" })),
+      refs: Object.assign(classifyRefs(a.references), a.html_url ? { advisory: [a.html_url] } : {}),
+      cwes, published: a.published_at || null, modified: a.updated_at || null
+    };
     return Object.assign({
       src: "GitHub Advisories", title, link: a.html_url || a.url || "", desc,
       date: (d && !isNaN(d)) ? d.toISOString() : null,
-      cveId: a.cve_id || null, cvssScore, waf: isWafApplicable(cwes, title + " " + desc), kev: false
+      cveId: a.cve_id || null, cvssScore, waf: isWafApplicable(cwes, title + " " + desc), kev: false, vx
     }, tagFlags(title + " " + desc, "GitHub Advisories"));
   });
 }
 
-function parseNvdCves(json){
+// minCvss: the 2-day window keeps only High/Critical; the per-CVE backfill passes 0 to take any record.
+function parseNvdCves(json, minCvss = NVD_MIN_CVSS, nowIso = new Date().toISOString()){
   const vulns = (json && json.vulnerabilities) || [];
   const out = [];
   for (const v of vulns){
     const c = v.cve;
     if (!c || !c.id) continue;
     const metrics = c.metrics || {};
-    const cvssArr = metrics.cvssMetricV31 || metrics.cvssMetricV30 || metrics.cvssMetricV2;
-    const score = cvssArr && cvssArr[0] && cvssArr[0].cvssData && cvssArr[0].cvssData.baseScore;
-    if (typeof score !== "number" || score < NVD_MIN_CVSS) continue; // keep it high/critical-only, not a raw firehose
+    const cv = nvdCvss(metrics);
+    const score = cv ? cv.score : null;
+    if (minCvss > 0 && (typeof score !== "number" || score < minCvss)) continue; // keep it high/critical-only, not a raw firehose
     const descEn = (c.descriptions || []).find(d => d.lang === "en");
-    const desc = ("CVSS " + score + ". " + (descEn ? descEn.value : "")).slice(0, 300);
-    const title = c.id + " (CVSS " + score + ")";
+    const desc = ((score != null ? "CVSS " + score + ". " : "") + (descEn ? descEn.value : "")).slice(0, 300);
+    const title = c.id + (score != null ? " (CVSS " + score + ")" : "");
     const d = c.published ? new Date(c.published) : null;
-    const cwes = (c.weaknesses || []).flatMap(w => (w.description || []).filter(x => x.lang === "en").map(x => x.value)).filter(Boolean);
+    const cwes = [...new Set((c.weaknesses || []).flatMap(w => (w.description || []).filter(x => x.lang === "en").map(x => x.value)).filter(x => /^CWE-\d+$/.test(x)))];
+    const v4 = (metrics.cvssMetricV40 || []).map(m => m.cvssData && m.cvssData.exploitMaturity).find(x => x && x !== "NOT_DEFINED");
+    const ssvc = ((metrics.ssvcV203 || [])[0] || {}).ssvcData;
+    const ssvcExp = ssvc && ((ssvc.options || []).find(o => o.exploitation) || {}).exploitation;
+    let products = cnaProducts(c.affected);
+    if (!products.length) products = cpeProducts(c.configurations);
+    if (!products.length) products = inferProduct(descEn && descEn.value);
+    const vx = {
+      cvssVer: cv ? cv.ver : "", vec: cv ? cv.vec : "", cvssSrc: cv ? cv.src : "",
+      products, refs: classifyRefs(c.references), cwes,
+      published: c.published || null, modified: c.lastModified || null, status: c.vulnStatus || "", cna: cvssSourceName(c.sourceIdentifier),
+      maturity: v4 || "", ssvc: ssvcExp || "", nvdAt: nowIso
+    };
+    if (c.cisaExploitAdd){ vx.kevAdded = c.cisaExploitAdd; vx.kevDue = c.cisaActionDue || ""; vx.kevAction = c.cisaRequiredAction || ""; }
     out.push(Object.assign({
       src: "NVD", title, link: "https://nvd.nist.gov/vuln/detail/" + c.id, desc,
       date: (d && !isNaN(d)) ? d.toISOString() : null,
-      cveId: c.id, cvssScore: score, waf: isWafApplicable(cwes, title + " " + desc), kev: false
+      cveId: c.id, cvssScore: score, waf: isWafApplicable(cwes, title + " " + desc), kev: !!c.cisaExploitAdd, vx
     }, tagFlags(title + " " + desc, "NVD")));
   }
   return out;
@@ -814,6 +1004,9 @@ function parseKev(data){
     dueDate: v.dueDate || null,
     ransomware: v.knownRansomwareCampaignUse === "Known",
     desc: v.shortDescription || "",
+    action: v.requiredAction || "",
+    notes: (String(v.notes || "").match(/https:\/\/[^\s;]+/) || [""])[0],
+    cwes: Array.isArray(v.cwes) ? v.cwes.filter(x => /^CWE-\d+$/.test(x)) : [],
     // KEV's JSON doesn't carry a CWE/CVSS field consistently, so this is keyword-only (no CWE input).
     waf: isWafApplicable(null, (v.vulnerabilityName || "") + " " + (v.shortDescription || ""))
   }));
@@ -919,11 +1112,23 @@ function dedupeIocs(list){
   return out;
 }
 
-// Builds the unified "Critical Vulnerabilities" list from three already-collected structured sources
-// (NVD CVSS≥7, GitHub Advisories, CISA KEV) rather than a new fetch — all three already carry a real
-// cveId, so this just merges same-CVE records across sources (e.g. a CVE both scored by NVD and listed
-// in KEV) and keeps the highest CVSS/most complete fields seen for it. Records without a cveId (i.e.
-// everything that isn't one of those three parsers) are ignored.
+// Builds the unified vulnerabilities list from three already-collected structured sources (NVD
+// CVSS≥7, GitHub Advisories, CISA KEV) rather than a new fetch — all three carry a real cveId, so this
+// merges same-CVE records across sources (e.g. a CVE both scored by NVD and listed in KEV), keeping
+// the highest CVSS and unioning `vx` enrichment (earlier inputs win on conflicts). Records without a
+// cveId are ignored.
+//
+// Ordering decides what survives mergeVulnData()'s cap: every KEV entry first (they arrive without a
+// CVSS score, and a CVSS-first sort used to push all but the few NVD also scored past the cap), then
+// likely-exploited (EPSS ≥ 10%, exploit reference, PoC maturity), then CVSS ≥ 9, then the rest —
+// newest first within each.
+function vulnKeepRank(v){
+  if (v.kev) return 0;
+  const vx = v.vx || {};
+  if ((v.epss != null && v.epss >= 0.1) || (vx.refs && vx.refs.exploit) || /ATTACKED|PROOF_OF_CONCEPT/.test(vx.maturity || "") || /active|poc/.test(vx.ssvc || "")) return 1;
+  if (v.cvssScore != null && v.cvssScore >= 9) return 2;
+  return 3;
+}
 function dedupeVulnerabilities(list){
   const byId = new Map();
   for (const v of list){
@@ -936,22 +1141,31 @@ function dedupeVulnerabilities(list){
         link: v.link || ("https://nvd.nist.gov/vuln/detail/" + key),
         date: v.date || null, cvssScore: (typeof v.cvssScore === "number") ? v.cvssScore : null,
         waf: !!v.waf, kev: !!v.kev, vendor: v.vendor || "", product: v.product || "", dueDate: v.dueDate || null,
-        lens: !!v.lens
+        lens: !!v.lens, vx: v.vx ? Object.assign({}, v.vx) : undefined,
+        seen: v.seen, epss: v.epss, epssPercentile: v.epssPercentile, epssDate: v.epssDate
       });
       continue;
     }
-    if (typeof v.cvssScore === "number" && (prev.cvssScore === null || v.cvssScore > prev.cvssScore)) prev.cvssScore = v.cvssScore;
+    if (typeof v.cvssScore === "number" && (prev.cvssScore === null || v.cvssScore > prev.cvssScore)){
+      prev.cvssScore = v.cvssScore;
+      if (v.vx && v.vx.vec) prev.vx = Object.assign({}, prev.vx, { cvssVer: v.vx.cvssVer, vec: v.vx.vec, cvssSrc: v.vx.cvssSrc });
+    }
+    prev.vx = mergeVx(prev.vx, v.vx);
     prev.waf = prev.waf || !!v.waf;
     prev.kev = prev.kev || !!v.kev;
     prev.lens = prev.lens || !!v.lens;
     if (!prev.desc && v.desc) prev.desc = v.desc;
+    // NVD's title is just "CVE-… (CVSS n)"; KEV and GitHub carry a real name.
+    if (/^CVE-\d+-\d+( \(CVSS [\d.]+\))?$/.test(prev.title) && v.title && !/^CVE-\d+-\d+( \(CVSS [\d.]+\))?$/.test(v.title)) prev.title = v.title;
     if (!prev.vendor && v.vendor) prev.vendor = v.vendor;
     if (!prev.product && v.product) prev.product = v.product;
     if (!prev.dueDate && v.dueDate) prev.dueDate = v.dueDate;
+    if (v.seen && (!prev.seen || v.seen < prev.seen)) prev.seen = v.seen;
+    if (prev.epss == null && v.epss != null){ prev.epss = v.epss; prev.epssPercentile = v.epssPercentile; prev.epssDate = v.epssDate; }
     if (v.date && (!prev.date || v.date > prev.date)) prev.date = v.date;
   }
-  const out = [...byId.values()];
-  out.sort((a, b) => ((b.cvssScore == null ? -1 : b.cvssScore) - (a.cvssScore == null ? -1 : a.cvssScore)) || String(b.date || "").localeCompare(String(a.date || "")));
+  const out = [...byId.values()].map(finalizeVuln);
+  out.sort((a, b) => (vulnKeepRank(a) - vulnKeepRank(b)) || String(b.date || "").localeCompare(String(a.date || "")));
   return out;
 }
 
@@ -998,23 +1212,39 @@ async function fetchVulnSources(){
   return { nvdItems, ghsaItems, kev, sourceStatus };
 }
 
-// Builds the merged/deduped { items, kev, vulnerabilities } trio from freshly fetched NVD/GHSA/KEV
-// records plus whatever was already in KV — used by both collect() and collectVulnerabilitiesOnly()
-// so the merge/window/cap rules can't drift between the two jobs.
-function mergeVulnData(nvdItems, ghsaItems, kev, prev, extraItems = []){
-  const cutoff = Date.now() - 365 * 86400000;
-  const mergedItems = dedupeItems([...extraItems, ...ghsaItems, ...nvdItems, ...prev.items]).filter(i => !i.date || new Date(i.date).getTime() >= cutoff).slice(0, ITEMS_CAP);
-  const mergedKev = dedupeKev([...kev, ...(prev.kev || [])]).filter(k => !k.dateAdded || new Date(k.dateAdded).getTime() >= cutoff).slice(0, 100);
+// `vx` only matters on the vulnerabilities list (which carries it forward itself); the NVD/GitHub
+// copies in the main `items` feed would just double its size in KV.
+function withoutVx(i){ if (!i.vx) return i; const o = Object.assign({}, i); delete o.vx; return o; }
+// The unified vulnerabilities list for one cycle: CVE-bearing feed items (NVD, GitHub Advisories) plus
+// the KEV entries, merged by dedupeVulnerabilities(). Shared by collect() and the 10-min job so the
+// merge, carry-forward and cap rules can't drift between them.
+function buildVulnList(mergedItems, mergedKev, prev, nowIso){
   const kevAsVulns = mergedKev.map(k => ({
     cveId: k.cveId, title: k.name || k.cveId, desc: k.desc,
     link: "https://nvd.nist.gov/vuln/detail/" + k.cveId, date: k.dateAdded,
     cvssScore: null, waf: k.waf, kev: true, vendor: k.vendor, product: k.product, dueDate: k.dueDate,
-    cc: [], rg: [], lens: false
+    cc: [], rg: [], lens: false,
+    vx: { products: k.product ? [{ vendor: k.vendor || "", product: k.product, versions: "", fixed: "", src: "CISA KEV" }] : [], cwes: k.cwes || [],
+      kevAdded: k.dateAdded, kevDue: k.dueDate || "", kevAction: k.action || "", kevNotes: k.notes || "", kevRansomware: !!k.ransomware }
   }));
-  const mergedVulnerabilities = dedupeVulnerabilities([
-    ...mergedItems.filter(i => (i.src === "NVD" || i.src === "GitHub Advisories") && i.cveId),
-    ...kevAsVulns
-  ]).slice(0, 400);
+  // The previous list is the lowest-priority input: it carries what only it has (the NVD backfill's
+  // fields for KEV/GitHub CVEs, `seen`, the last EPSS score for the keep-ranking) for CVEs that are
+  // still in today's sources, and never resurrects a CVE that has dropped out of them.
+  const current = [...mergedItems.filter(i => (i.src === "NVD" || i.src === "GitHub Advisories") && i.cveId), ...kevAsVulns];
+  const ids = new Set(current.map(v => String(v.cveId).toUpperCase()));
+  const carried = (prev.vulnerabilities || []).filter(v => v.cveId && ids.has(String(v.cveId).toUpperCase()));
+  return dedupeVulnerabilities([...current, ...carried]).slice(0, VULN_CAP)
+    .map(v => v.seen ? v : Object.assign(v, { seen: nowIso }));
+}
+
+// Builds the merged/deduped { items, kev, vulnerabilities } trio from freshly fetched NVD/GHSA/KEV
+// records plus whatever was already in KV — used by both collect() and collectVulnerabilitiesOnly()
+// so the merge/window/cap rules can't drift between the two jobs.
+function mergeVulnData(nvdItems, ghsaItems, kev, prev, extraItems = [], nowIso = new Date().toISOString()){
+  const cutoff = Date.now() - 365 * 86400000;
+  const mergedItems = dedupeItems([...extraItems, ...ghsaItems, ...nvdItems, ...prev.items]).filter(i => !i.date || new Date(i.date).getTime() >= cutoff).slice(0, ITEMS_CAP);
+  const mergedKev = dedupeKev([...kev, ...(prev.kev || [])]).filter(k => !k.dateAdded || new Date(k.dateAdded).getTime() >= cutoff).slice(0, 100);
+  const mergedVulnerabilities = buildVulnList(mergedItems, mergedKev, prev, nowIso);
   return { mergedItems, mergedKev, mergedVulnerabilities };
 }
 
@@ -1032,7 +1262,7 @@ async function fetchEpssScores(cveIds){
       for (const row of (j.data || [])){
         const epss = parseFloat(row.epss);
         const percentile = parseFloat(row.percentile);
-        if (!isNaN(epss)) scores.set(String(row.cve).toUpperCase(), { epss, percentile: isNaN(percentile) ? null : percentile });
+        if (!isNaN(epss)) scores.set(String(row.cve).toUpperCase(), { epss, percentile: isNaN(percentile) ? null : percentile, date: row.date || null });
       }
     } catch (e){ /* leave this batch's CVEs unscored; self-heals next cycle */ }
   }));
@@ -1050,7 +1280,7 @@ async function enrichEpss(vulnerabilities, sourceStatus){
   sourceStatus["EPSS"] = { ok: true, count: scores.size };
   return vulnerabilities.map(v => {
     const s = v.cveId && scores.get(String(v.cveId).toUpperCase());
-    return Object.assign({}, v, { epss: s ? s.epss : null, epssPercentile: s ? s.percentile : null });
+    return Object.assign({}, v, { epss: s ? s.epss : null, epssPercentile: s ? s.percentile : null, epssDate: s ? s.date : null });
   });
 }
 
@@ -1298,6 +1528,39 @@ async function fetchRssBatch(sources){
   return { items, sourceStatus, infocon };
 }
 
+// The 2-day NVD window only covers newly published CVEs, so KEV entries (usually older CVEs) and
+// GitHub-only ones would never get NVD's CVSS, products or tagged references. Each 10-min run reads
+// NVD_BACKFILL_PER_RUN of them one at a time from NVD's per-CVE API — KEV first, newest first — and
+// re-reads records NVD hadn't analysed yet once they're NVD_RECHECK_MS old. ~18/hour clears the
+// 400-record list in about a day, then stays near zero. Unauthenticated NVD allows 5 requests per
+// 30 s; this job makes 1 window query + 3 here.
+const NVD_BACKFILL_PER_RUN = 3;
+const NVD_RECHECK_MS = 3 * 86400000;
+async function nvdBackfill(vulns, sourceStatus, nowIso = new Date().toISOString()){
+  const now = Date.parse(nowIso);
+  const due = v => { const vx = v.vx || {}; return !vx.nvdAt || (/Received|Awaiting|Undergoing|Deferred/i.test(vx.status || "") && now - Date.parse(vx.nvdAt) > NVD_RECHECK_MS); };
+  const pick = vulns.filter(due).sort((a, b) => (Number(b.kev) - Number(a.kev)) || String(b.date || "").localeCompare(String(a.date || ""))).slice(0, NVD_BACKFILL_PER_RUN);
+  if (!pick.length) return vulns;
+  const got = new Map();
+  let failed = 0, lastErr = "";
+  await Promise.all(pick.map(async v => {
+    try {
+      const rec = parseNvdCves(await fetchJson(NVD_CVE_URL + "?cveId=" + encodeURIComponent(v.cveId)), 0, nowIso)[0];
+      got.set(v.cveId, rec || { vx: { nvdAt: nowIso, status: "Not in NVD" } });
+    } catch (e){ failed++; lastErr = String(e.message || e); }
+  }));
+  sourceStatus["NVD backfill"] = failed === pick.length ? { ok: false, error: lastErr } : { ok: true, count: got.size };
+  return vulns.map(v => {
+    const r = got.get(v.cveId);
+    if (!r) return v;
+    const out = Object.assign({}, v, { vx: mergeVx(r.vx, v.vx) });
+    if (r.vx && r.vx.vec && (out.cvssScore == null || r.cvssScore >= out.cvssScore)){ out.cvssScore = r.cvssScore; Object.assign(out.vx, { cvssVer: r.vx.cvssVer, vec: r.vx.vec, cvssSrc: r.vx.cvssSrc }); }
+    if (r.vx && r.vx.status) out.vx.status = r.vx.status;
+    out.vx.nvdAt = nowIso;
+    return finalizeVuln(out);
+  });
+}
+
 // Dedicated fast cron (see CVE_ONLY_CRON / wrangler.toml) that refreshes the CVE-bearing sources —
 // NVD, GitHub Advisories, CISA KEV — plus one rotating slice of the RSS feeds (see rssBatchForNow()).
 // Everything else in the cached blob (victims, telegram, ransomwareNews, iocs) is passed
@@ -1310,13 +1573,14 @@ async function collectVulnerabilitiesOnly(env){
   const prevRaw = await env.THREAT_DATA.get("latest");
   const prev = prevRaw ? JSON.parse(prevRaw) : { items: [], victims: [], kev: [], telegram: [], ransomwareNews: [], iocs: [], vulnerabilities: [], infocon: "green", sourceStatus: {} };
 
-  const { mergedItems, mergedKev, mergedVulnerabilities } = mergeVulnData(nvdItems, ghsaItems, kev, prev, rss.items);
+  const { mergedItems, mergedKev, mergedVulnerabilities } = mergeVulnData(nvdItems, ghsaItems, kev, prev, rss.items, nowIso);
   const enrichedVulnerabilities = await enrichEpss(mergedVulnerabilities, sourceStatus);
+  const backfilled = await nvdBackfill(enrichedVulnerabilities, sourceStatus, nowIso);
 
   const data = Object.assign({}, prev, {
-    items: mergedItems,
+    items: mergedItems.map(withoutVx),
     kev: mergedKev,
-    vulnerabilities: enrichedVulnerabilities,
+    vulnerabilities: backfilled,
     vulnGenerated: nowIso,
     infocon: rss.infocon || prev.infocon || "green",
     sourceStatus: Object.assign({}, prev.sourceStatus, sourceStatus)
@@ -1456,16 +1720,7 @@ async function collect(env){
 
   // Critical Vulnerabilities tab: reuse the CVE-bearing items already merged above (NVD, GitHub
   // Advisories) plus the full KEV catalog, rather than fetching a fourth source — see dedupeVulnerabilities().
-  const kevAsVulns = mergedKev.map(k => ({
-    cveId: k.cveId, title: k.name || k.cveId, desc: k.desc,
-    link: "https://nvd.nist.gov/vuln/detail/" + k.cveId, date: k.dateAdded,
-    cvssScore: null, waf: k.waf, kev: true, vendor: k.vendor, product: k.product, dueDate: k.dueDate,
-    cc: [], rg: [], lens: false
-  }));
-  const mergedVulnerabilities = dedupeVulnerabilities([
-    ...mergedItems.filter(i => (i.src === "NVD" || i.src === "GitHub Advisories") && i.cveId),
-    ...kevAsVulns
-  ]).slice(0, 400);
+  const mergedVulnerabilities = buildVulnList(mergedItems, mergedKev, prev, nowIso);
   const enrichedVulnerabilities = await enrichEpss(mergedVulnerabilities, sourceStatus);
 
   // RSS feeds are fetched by the 10-min job, not here — carry their last status (and that job's
@@ -1479,7 +1734,7 @@ async function collect(env){
     vulnGenerated: prev.vulnGenerated || null,
     infocon: infocon || prev.infocon || "green",
     sourceStatus: Object.assign(carriedRss, sourceStatus),
-    items: mergedItems,
+    items: mergedItems.map(withoutVx),
     victims: mergedVictims,
     kev: mergedKev,
     telegram: mergedTelegram,
@@ -1752,7 +2007,7 @@ function json(obj, status){
 }
 
 // Named exports are unused by the Worker runtime but make these functions easy to unit test.
-export { decode, tag, geoTag, ccRegion, withGeo, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, radarGet, parseRadarSummary, parseRadarTop, parseRadarIndustries, parseRadarSeries, parseRadarOutages, collectDdosTelemetry, parseIodaSummary, parseIodaEvents, collectOutages, mergeOutages, radarForCountry, rwCountriesForNow, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
+export { decode, tag, geoTag, ccRegion, withGeo, parseItems, parseRwJson, parseKev, parseGithubAdvisories, parseNvdCves, parseOpenPhish, parseTelegramChannel, parseAbusechDate, parseUrlhausIocs, parseThreatfoxIocs, parseMalwareBazaarIocs, dedupeItems, dedupeVictims, capVictims, dedupeKev, dedupeTelegram, dedupeIocs, dedupeVulnerabilities, isWafApplicable, fetchEpssScores, enrichEpss, fetchRadarSummary, radarGet, parseRadarSummary, parseRadarTop, parseRadarIndustries, parseRadarSeries, parseRadarOutages, collectDdosTelemetry, parseIodaSummary, parseIodaEvents, collectOutages, mergeOutages, radarForCountry, rwCountriesForNow, parseMispEvent, fetchMispEvent, collectMisp, collect, fetchVulnSources, mergeVulnData, collectVulnerabilitiesOnly, nvdBackfill, classifyEdge, cnaProducts, cpeProducts, inferProduct, mergeVx, fetchRssBatch, rssBatchForNow, parseCsv, parseAptTab, applyMsTaxonomy, diffAptGroups, collectAptSheet, isIpLiteral };
 
 export default {
   async fetch(request, env, ctx){

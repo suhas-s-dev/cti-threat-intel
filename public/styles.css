@@ -880,6 +880,80 @@ body.rw-drawer-open { overflow: hidden; }
 }
 @media print { .rw-filters, .rw-chips, .rw-tablebar-r, .rw-drawer, .rw-drawer-back, #rw-watch-btn { display: none !important; } }
 
+/* ── Vulnerabilities page: KEV strip, priority queue, changes, analysis ─────────────────────── */
+.vn-how { margin: 0 0 var(--space-4); font-size: 13.5px; }
+.vn-how summary { cursor: pointer; color: var(--color-accent-700); font-weight: 600; font-size: 13px; }
+.vn-how-body { margin-top: var(--space-2); padding: var(--space-4) var(--space-5); border: 1px solid var(--color-divider); border-radius: var(--radius-lg); background: var(--color-panel); max-width: 100ch; color: var(--color-neutral-800); }
+.vn-how-body ol { margin: 0 0 var(--space-3); padding-left: 1.3em; display: flex; flex-direction: column; gap: 4px; }
+.vn-how-body p { margin: 0 0 var(--space-2); }
+.vn-datebar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-4); font-size: 13px; }
+.vn-datebar .input { font-size: 13px; }
+.vn-kev { padding: var(--space-4) var(--space-5); border-left: 4px solid var(--lvl-red); }
+.vn-kev-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-3); font-size: 14px; }
+.vn-kev-head .rw-dim { font-size: 12.5px; }
+.vn-kev-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
+.vn-kev-item { display: flex; flex-direction: column; gap: 2px; text-align: left; font: inherit; color: var(--color-text); background: var(--color-panel-2); border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: var(--space-3); cursor: pointer; min-width: 0; }
+.vn-kev-item:hover { border-color: var(--color-divider-strong); }
+.vn-kev-id { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.vn-kev-prod { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vn-kev .btn-ghost { margin-top: var(--space-2); padding: 0; font-size: 13px; }
+.vn-sub { font-size: 12px; color: var(--color-neutral-700); margin-top: 2px; }
+.vn-kev-tag { color: var(--lvl-red); border-color: color-mix(in srgb, var(--lvl-red) 55%, transparent); background: color-mix(in srgb, var(--lvl-red) 10%, transparent); }
+.vn-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.vn-filters #vuln-search { flex: 1 1 240px; width: auto; font-size: 13.5px; }
+.vn-tablewrap { overflow: visible; }
+.vn-table { font-size: 14px; }
+.vn-table th { font-size: 12px; letter-spacing: .04em; color: var(--color-neutral-800); position: sticky; top: 60px; z-index: 2; }
+.vn-table thead th:first-child { border-top-left-radius: var(--radius-lg); }
+.vn-table thead th:last-child { border-top-right-radius: var(--radius-lg); }
+.vn-table td { vertical-align: top; }
+.vn-table tbody tr { cursor: pointer; }
+.vn-table td[data-label="Vulnerability"] { width: 34%; }
+.vn-cve { font-family: var(--font-mono); font-size: 13px; }
+.vn-title { margin-top: 2px; font-size: 13.5px; line-height: 1.4; }
+.vn-prod { margin-top: 2px; font-size: 12.5px; color: var(--color-neutral-800); font-weight: 600; }
+.vn-prod .rw-dim { font-weight: 400; }
+.vn-tier { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--color-divider); white-space: nowrap; }
+.vn-t1 { color: var(--lvl-red); border-color: color-mix(in srgb, var(--lvl-red) 55%, transparent); background: color-mix(in srgb, var(--lvl-red) 10%, transparent); }
+.vn-t2 { color: var(--lvl-orange); border-color: color-mix(in srgb, var(--lvl-orange) 50%, transparent); }
+.vn-t3 { color: var(--color-text); border-color: var(--color-divider-strong); }
+.vn-t4 { color: var(--color-neutral-700); }
+.vn-reasons { font-size: 12px; color: var(--color-neutral-800); margin-top: 4px; line-height: 1.45; }
+.vn-epss { font-family: var(--font-mono); font-size: 13px; }
+.vn-epss-hi { font-weight: 700; }
+.vn-fix { font-size: 13px; }
+.vn-fix-fix { font-weight: 600; }
+.vn-fix-none { color: var(--color-neutral-700); }
+.vn-edge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: var(--radius-sm); border: 1px solid var(--color-divider); white-space: nowrap; cursor: help; }
+.vn-edge-documented { border-color: var(--color-accent); color: var(--color-accent-700); font-weight: 700; }
+.vn-edge-potential { border-color: color-mix(in srgb, var(--color-accent) 50%, transparent); border-style: dashed; color: var(--color-accent-700); }
+.vn-edge-na, .vn-edge-unknown { color: var(--color-neutral-700); }
+.vn-why { margin: var(--space-2) 0; padding-left: 1.2em; font-size: 13.5px; }
+.vn-why li.hot { color: var(--lvl-red); font-weight: 600; }
+.vn-why li.watch { color: var(--color-accent-700); font-weight: 600; }
+.vn-vec { font-size: 11.5px; overflow-wrap: anywhere; }
+.vn-change { display: grid; grid-template-columns: 13em auto 1fr auto; align-items: baseline; gap: var(--space-3); font-size: 13.5px; }
+.vn-change-kind { font-size: 12px; color: var(--color-neutral-800); }
+.vn-change-kind.hot { color: var(--lvl-red); font-weight: 700; }
+.vn-change-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vn-change-t { font-family: var(--font-mono); font-size: 12px; }
+.vn-analysis { margin-top: var(--space-6); padding: var(--space-4) var(--space-5); }
+.vn-analysis summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.vn-analysis .vuln-matrix { margin: var(--space-3) 0 0; padding: 0 !important; }
+@media (max-width: 960px) { .vn-kev-list { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 640px) {
+  .vn-kev-list { grid-template-columns: 1fr; }
+  .vn-table th { position: static; }
+  .vn-tablewrap .table tr { padding: var(--space-3) var(--space-4); }
+  .vn-table td[data-label="Vulnerability"] { display: block; width: 100%; text-align: left; }
+  .vn-table td[data-label="Vulnerability"]::before { display: block; margin-bottom: 2px; }
+  .vn-table tr.rw-watched td:first-child { box-shadow: none; }
+  .vn-table tr.rw-watched { box-shadow: inset 3px 0 0 var(--color-accent); }
+  .vn-change { grid-template-columns: 1fr auto; }
+  .vn-change-what { grid-column: 1 / -1; white-space: normal; }
+  .vn-filters .apj-seg { width: 100%; }
+}
+
 /* ── Print: briefs always print light (dark tokens are screen-only); drop interactive chrome ── */
 @media print {
   .nav, .status-strip, .apj-seg, .section-controls, .export-banner, .theme-toggle, .ipcheck, [data-action="download-brief"] { display: none !important; }
