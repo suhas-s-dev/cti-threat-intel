@@ -2288,6 +2288,112 @@ function makeBrief(){
   el.innerHTML = renderStructuredBrief(pool, rwVictims);
 }
 
+/* ---------------- Brief: threat pulse (one timeline, four signals) ----------------
+   Daily (weekly past 90 days) counts over the header window and region for the four signals that
+   have dated history: ransomware claims, CISA KEV additions, security reporting, and Telegram/
+   Mastodon posts (self-claims shaded). Each lane is scaled to its own max — they're different units.
+   A source whose stored array is at its cap has lost everything older than its oldest kept entry, so
+   those buckets are hatched as "not retained" instead of drawn as zero (rwCompleteSince() does the
+   same per region for claims). Caps mirror the worker: kev 100, items ITEMS_CAP 1500, telegram 300,
+   ransomwareNews 150. */
+const PULSE_CAPS = { kev: 100, items: 1500, telegram: 300, ransomwareNews: 150 };
+function pulseOldest(list, f, cap){
+  if (list.length < cap) return null; // under its cap: nothing has been trimmed yet
+  const t = list.map(x => { const d = x[f]; return d instanceof Date ? d.getTime() : Date.parse(d); }).filter(x => !isNaN(x));
+  return t.length ? Math.min(...t) : null;
+}
+function renderPulse(){
+  const host = $("#pulse-lanes");
+  if (!host) return;
+  const DAY = 86400000, step = rangeDays > 90 ? 7 : 1;
+  const end = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) + DAY; // end of today, UTC
+  const n = Math.ceil(rangeDays / step), start = end - n * step * DAY;
+  const bucket = t => { const i = Math.floor((t - start) / (step * DAY)); return i >= 0 && i < n ? i : -1; };
+  const ts = d => d instanceof Date ? d.getTime() : Date.parse(d);
+  const regions = geo === "all" ? [...GEO_KEYS, "other"] : [geo];
+  const telegramAndMasto = [...telegramItems, ...rwNewsItems].filter(i => itemInGeo(i));
+  const lanes = [
+    { key: "rw", label: "Ransomware claims", sub: "Leak-site posts · ransomware.live", tab: "ransomware",
+      rows: rwVictims.filter(v => victimInGeo(v)).map(v => ({ t: ts(v.date), v })), since: rwCompleteSince(regions), unit: "claims" },
+    { key: "kev", label: "Added to CISA KEV", sub: "Known exploited · worldwide", tab: "vulnerabilities", hot: true,
+      rows: (DATA.kev || []).map(k => ({ t: Date.parse(k.dateAdded + "T12:00:00Z"), k })), since: pulseOldest(DATA.kev || [], "dateAdded", PULSE_CAPS.kev), unit: "CVEs" },
+    { key: "news", label: "Security reporting", sub: geo === "all" ? "News and advisories · all feeds" : "News and advisories naming " + geoLabel(), tab: "country",
+      rows: allItems.filter(i => itemInGeo(i)).map(i => ({ t: ts(i.date) })), since: pulseOldest(allItems, "date", PULSE_CAPS.items), unit: "items" },
+    { key: "social", label: "Community posts", sub: "Telegram + Mastodon · darker = actor self-claims", tab: "telegram",
+      rows: telegramAndMasto.map(i => ({ t: ts(i.date), claim: !!i.claim })),
+      since: Math.max(pulseOldest(telegramItems, "date", PULSE_CAPS.telegram) || 0, pulseOldest(rwNewsItems, "date", PULSE_CAPS.ransomwareNews) || 0) || null, unit: "posts" }
+  ];
+  const fmtB = i => { const d = new Date(start + i * step * DAY); return d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }); };
+  $("#pulse-sub").textContent = (step === 1 ? "Daily" : "Weekly") + " · last " + rangeDays + " days · " + (geo === "all" ? "Global" : geoLabel()) + " · UTC";
+  host.innerHTML = lanes.map(L => {
+    const counts = new Array(n).fill(0), claims = new Array(n).fill(0);
+    L.rows.forEach(r => { const i = bucket(r.t); if (i >= 0){ counts[i]++; if (r.claim) claims[i]++; } });
+    const firstKept = L.since != null && L.since > start ? Math.min(n, Math.floor((L.since - start) / (step * DAY)) + 1) : 0; // buckets before this are partly or wholly trimmed
+    const total = counts.reduce((a, b) => a + b, 0), max = Math.max(1, ...counts);
+    // Spike: the biggest bucket when it clearly stands out from the typical kept one.
+    const kept = counts.slice(firstKept).filter(c => c > 0).sort((a, b) => a - b);
+    const med = kept.length ? kept[Math.floor(kept.length / 2)] : 0;
+    const peak = counts.indexOf(Math.max(...counts));
+    let spike = "";
+    if (peak >= firstKept && counts[peak] >= 3 && counts[peak] >= 2 * Math.max(1, med)){
+      let note = counts[peak] + " " + L.unit;
+      if (L.key === "rw"){
+        const top = countByKey(L.rows.filter(r => bucket(r.t) === peak).map(r => r.v), "group")[0];
+        if (top) note += " · most from " + top[0] + " (" + top[1] + ")";
+      }
+      // Anchor the label inside the plot near either edge so it never spills past the card.
+      const pct = (peak + .5) / n * 100, anchor = pct < 20 ? "start" : pct > 80 ? "end" : "mid";
+      spike = '<div class="pulse-spike pulse-spike-' + anchor + '" style="left:' + pct.toFixed(2) + '%"><span>▲ ' + esc(fmtB(peak)) + " · " + esc(note) + "</span></div>";
+    }
+    // Change vs the previous equal period, only where that period is fully retained.
+    let delta = "";
+    if (L.key === "rw" || L.key === "kev"){
+      const prevStart = start - n * step * DAY;
+      if (L.since == null || L.since <= prevStart){
+        const prev = L.rows.filter(r => r.t >= prevStart && r.t < start).length, d = total - prev;
+        delta = '<span class="pulse-delta">' + (d > 0 ? "▲ " + d : d < 0 ? "▼ " + Math.abs(d) : "no change") + " vs prior " + rangeDays + "d</span>";
+      }
+    }
+    if (!delta && firstKept > 0) delta = '<span class="pulse-delta">Retained from ' + esc(fmtB(firstKept)) + "</span>";
+    const W = n * 10, H = 44, bw = 10 * (step === 1 && n <= 31 ? .72 : .86);
+    const bars = counts.map((c, i) => {
+      const x = i * 10 + (10 - bw) / 2;
+      if (i < firstKept) return '<rect class="pulse-gap" x="' + (i * 10) + '" y="0" width="10" height="' + H + '"><title>' + esc(fmtB(i)) + ": not retained</title></rect>";
+      const h = c ? Math.max(2, c / max * (H - 2)) : 0, ch = claims[i] ? Math.max(1.5, claims[i] / max * (H - 2)) : 0;
+      const tip = esc(fmtB(i)) + (step > 1 ? " week" : "") + ": " + c + " " + L.unit + (claims[i] ? " (" + claims[i] + " self-claims)" : "");
+      return '<g class="pulse-b' + (L.key === "rw" && c ? " pulse-click" : "") + '" data-i="' + i + '"><rect class="pulse-hit" x="' + (i * 10) + '" y="0" width="10" height="' + H + '"></rect>' +
+        (h ? '<rect class="pulse-bar' + (L.hot ? " hot" : "") + '" x="' + x.toFixed(1) + '" y="' + (H - h).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="1"></rect>' : '<rect class="pulse-zero" x="' + x.toFixed(1) + '" y="' + (H - 1) + '" width="' + bw.toFixed(1) + '" height="1"></rect>') +
+        (ch ? '<rect class="pulse-bar claim" x="' + x.toFixed(1) + '" y="' + (H - ch).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + ch.toFixed(1) + '" rx="1"></rect>' : "") +
+        "<title>" + tip + "</title></g>";
+    }).join("");
+    return '<div class="pulse-lane" data-lane="' + L.key + '">' +
+      '<button type="button" class="pulse-label" data-tab="' + L.tab + '"><b>' + esc(L.label) + "</b><span>" + esc(L.sub) + "</span>" + (spike ? '<em class="pulse-spike-note">' + spike.replace(/<[^>]+>/g, "") + "</em>" : "") + "</button>" +
+      '<div class="pulse-plot">' + spike + '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" role="img" aria-label="' + esc(L.label + ": " + total + " " + L.unit + " in the last " + rangeDays + " days") + '"><defs><pattern id="pulse-hatch-' + L.key + '" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.5" height="4" class="pulse-hatch"></rect></pattern></defs>' +
+        bars.replace(/class="pulse-gap"/g, 'class="pulse-gap" fill="url(#pulse-hatch-' + L.key + ')"') + "</svg></div>" +
+      '<div class="pulse-total"><b>' + total.toLocaleString() + "</b><span>" + esc(L.unit) + "</span>" + delta + "</div>" +
+    "</div>";
+  }).join("");
+  const ticks = 5, axis = [];
+  for (let k = 0; k < ticks; k++){ const i = Math.round(k * (n - 1) / (ticks - 1)); axis.push('<span style="left:' + ((i + .5) / n * 100).toFixed(2) + '%">' + esc(fmtB(i)) + "</span>"); }
+  $("#pulse-axis").innerHTML = '<div class="pulse-axis-inner">' + axis.join("") + "</div>";
+}
+function wirePulse(){
+  const el = $("#pulse");
+  if (!el) return;
+  el.addEventListener("click", e => {
+    const lab = e.target.closest(".pulse-label");
+    if (lab){ showTab(lab.dataset.tab); window.scrollTo(0, 0); return; }
+    const g = e.target.closest(".pulse-click");
+    if (g && rangeDays <= 90){
+      // A ransomware day opens the claims table filtered to that UTC day.
+      const DAY = 86400000, n = rangeDays;
+      const end = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) + DAY;
+      rwF.day = new Date(end - (n - parseInt(g.dataset.i, 10)) * DAY).toISOString().slice(0, 10); rwPage = 0;
+      showTab("ransomware"); renderRw(); window.scrollTo(0, 0);
+    }
+  });
+}
+
 /* ---------------- Markdown export ---------------- */
 function buildMarkdown(){
   const pool = allItems.slice().sort((a,b) => (b.date?b.date.getTime():0) - (a.date?a.date.getTime():0));
@@ -3274,7 +3380,7 @@ function wireActions(){
     rangeDays = parseInt(c.dataset.t, 10);
     localStorage.setItem("apjti.range", String(rangeDays));
     document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.t === c.dataset.t)));
-    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); renderActors(); buildDashboard();
+    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); renderActors(); renderPulse(); buildDashboard();
   }));
   document.querySelectorAll("[data-geo]").forEach(c => c.addEventListener("click", () => setGeo(c.dataset.geo)));
   document.querySelectorAll("[data-tgf]").forEach(c => c.addEventListener("click", () => {
@@ -3612,6 +3718,7 @@ async function renderAll(){
   renderSnapshot();
   renderKev();
   makeBrief();
+  renderPulse();
   buildDashboard();
 }
 
@@ -3628,6 +3735,7 @@ async function init(){
   wireRw();
   wireVulns();
   wireActors();
+  wirePulse();
   wireIpCheck();
   wireNavToggle();
   wireThemeToggle();

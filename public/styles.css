@@ -157,6 +157,9 @@ img { display: block; max-width: 100%; }
 .apj-eyebrow { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-neutral-700); }
 
 .grid-2-1 { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: var(--space-4); }
+/* Brief items carry long unbroken URLs and domain lists; let them wrap instead of widening the page on phones. */
+.grid-2-1 > * { min-width: 0; }
+#brief-text li { overflow-wrap: anywhere; }
 .feed-grid, .actor-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-3); }
 .actor-grid { gap: var(--space-4); }
 .rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin-top: var(--space-6); }
@@ -1015,6 +1018,52 @@ body.rw-drawer-open { overflow: hidden; }
 .ac-table .btn-ghost { padding: 2px 0; font-size: 12.5px; }
 @media (max-width: 900px) { .ac-grid, .ac-trend-panels { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .ac-filters .input { max-width: none; width: 100%; flex: 1 1 100%; } .ac-facts { grid-template-columns: 1fr; } }
+
+/* ── Brief: threat pulse (renderPulse) ───────────────────────────────────────────────────── */
+.pulse { padding: var(--space-5) var(--space-6); margin-bottom: var(--space-5); gap: var(--space-3); }
+.pulse-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px var(--space-4); }
+.pulse-head h3 { font-size: 17px; }
+.pulse-lanes { display: flex; flex-direction: column; }
+.pulse-lane { display: grid; grid-template-columns: 13.5em minmax(0, 1fr) 12em; align-items: end; gap: var(--space-4); padding: var(--space-3) 0; border-bottom: 1px solid var(--color-divider); }
+.pulse-lane:last-child { border-bottom: 0; }
+.pulse-label { display: flex; flex-direction: column; gap: 2px; text-align: left; font: inherit; color: var(--color-text); background: none; border: 0; padding: 0 0 2px; cursor: pointer; align-self: center; }
+.pulse-label b { font-size: 14px; }
+.pulse-label span { font-size: 12px; color: var(--color-neutral-700); line-height: 1.35; }
+.pulse-label:hover b { color: var(--color-accent-700); text-decoration: underline; text-underline-offset: 3px; }
+.pulse-plot { position: relative; height: 48px; padding-top: 4px; }
+.pulse-plot svg { display: block; width: 100%; height: 44px; overflow: visible; }
+.pulse-bar { fill: var(--color-accent); opacity: .8; }
+.pulse-bar.hot { fill: var(--lvl-red); opacity: .75; }
+.pulse-bar.claim { fill: var(--color-accent-800); opacity: 1; }
+.pulse-zero { fill: var(--color-divider-strong); }
+.pulse-hit { fill: transparent; }
+.pulse-b:hover .pulse-bar { opacity: 1; }
+.pulse-click { cursor: pointer; }
+.pulse-gap { stroke: none; }
+.pulse-hatch { fill: var(--color-divider-strong); opacity: .55; }
+.pulse-spike { position: absolute; top: -14px; transform: translateX(-50%); white-space: nowrap; pointer-events: none; z-index: 1; }
+.pulse-spike span { font-size: 11px; font-family: var(--font-mono); color: var(--color-neutral-800); background: var(--color-panel); padding: 0 4px; border-radius: 4px; }
+.pulse-spike-start { transform: translateX(-6px); } .pulse-spike-end { transform: translateX(calc(-100% + 6px)); }
+.pulse-spike-note { display: none; font-style: normal; font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-800); margin-top: 2px; }
+.pulse-lane:first-child .pulse-plot { margin-top: 10px; }
+.pulse-total { display: flex; flex-direction: column; align-items: flex-end; text-align: right; align-self: center; }
+.pulse-total b { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.pulse-total > span { font-size: 12px; color: var(--color-neutral-700); }
+.pulse-delta { margin-top: 3px; font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-800); }
+.pulse-axis { display: grid; grid-template-columns: 13.5em minmax(0, 1fr) 12em; gap: var(--space-4); }
+.pulse-axis-inner { grid-column: 2; position: relative; height: 16px; }
+.pulse-axis-inner span { position: absolute; transform: translateX(-50%); font-family: var(--font-mono); font-size: 11px; color: var(--color-neutral-700); white-space: nowrap; }
+.pulse-axis-inner span:first-child { transform: none; }
+.pulse-axis-inner span:last-child { transform: translateX(-100%); }
+@media (max-width: 720px) {
+  .pulse { padding: var(--space-4); }
+  .pulse-lane { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label total" "plot plot"; row-gap: var(--space-2); }
+  .pulse-label { grid-area: label; } .pulse-total { grid-area: total; } .pulse-plot { grid-area: plot; }
+  .pulse-axis { grid-template-columns: 1fr; } .pulse-axis-inner { grid-column: 1; }
+  .pulse-spike { display: none; }
+  .pulse-spike-note { display: block; }
+  .pulse-lane:first-child .pulse-plot { margin-top: 0; }
+}
 
 /* ── Print: briefs always print light (dark tokens are screen-only); drop interactive chrome ── */
 @media print {
