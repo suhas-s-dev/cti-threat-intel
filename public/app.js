@@ -320,6 +320,7 @@ function showTab(id, opts){
   if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
   if (id === "ransomware" && rwTrendInst) rwTrendInst.resize();
   closeDrawer(); // the side drawer belongs to the tab that opened it
+  syncFlowAnimation(); // the Brief globe only animates while the Brief is showing
   document.body.classList.toggle("map-mode", id === "country"); // before syncView(): sizes depend on layout
   if (id === "country"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
@@ -2292,12 +2293,15 @@ function makeBrief(){
    Drawn from the `ddosTelemetry` KV field collectDdosTelemetry() already stores (7-day window, no new
    fetches): `l7Pairs` (source → target country share of mitigated HTTP DDoS traffic) as arcs, and
    `l3Targets` / `l3Origins` as country fills. Equal Earth projection on filled country shapes from the
-   same world-atlas file Geo Intel loads, so it reads as a different map from Geo Intel's dot matrix.
+   same world-atlas file Geo Intel loads. The default view is a night-Earth globe (globe.gl, already
+   used by Geo Intel) with a drifting particle field behind it; the flat SVG map is the fallback when
+   WebGL or the CDN is unavailable.
    Everything is a percentage of attack traffic over the week — not individual attacks, not live, and a
    "source" country is where the traffic came from (botnets, proxies), not who ordered it. */
 const FLOW_ARCS = 24;
 let flowMode = (() => { try { const m = localStorage.getItem("apjti.flowMode"); return ["flows", "targets", "origins"].includes(m) ? m : "flows"; } catch (_){ return "flows"; } })();
 let flowGeo = null, flowGeoState = "idle", flowHover = null;
+let flowGlobe = null, flowGlobeState = "idle", flowModel = null, flowVisible = true, flowAimedGeo = null;
 function equalEarth(lon, lat){
   const A1 = 1.340264, A2 = -0.081106, A3 = 0.000893, A4 = 0.003796, M = Math.sqrt(3) / 2;
   const l = lon * Math.PI / 180, th = Math.asin(M * Math.sin(lat * Math.PI / 180)), t2 = th * th, t6 = t2 * t2 * t2;
@@ -2348,7 +2352,7 @@ async function loadFlowGeo(){
     flowGeoState = "failed";
     console.warn("Attack flows: world atlas unavailable", e);
   }
-  renderFlows();
+  if (flowModel && flowGlobeState === "failed") renderFlatFlows(flowModel);
 }
 function flowPoint(cc){
   if (flowGeo && flowGeo.centroid[cc]) return flowGeo.centroid[cc];
@@ -2363,13 +2367,14 @@ function renderFlows(){
   const t = DATA.ddosTelemetry;
   if (!t || !(t.l7Pairs || []).length && !(t.l3Targets || []).length){
     mapEl.innerHTML = '<div class="empty">No Cloudflare Radar data yet. It needs the CF_RADAR_TOKEN secret and one full collection.</div>';
+    mapEl.hidden = false; $("#flows-globe").hidden = true;
     ["#flows-list", "#flows-stats"].forEach(s => { $(s).innerHTML = ""; });
     $("#flows-sub").textContent = ""; $("#flows-note").textContent = ""; $("#flows-list-h").textContent = "";
     return;
   }
-  if (flowGeoState === "idle") loadFlowGeo();
+  if (flowGlobeState === "idle") initFlowGlobe();
   const inGeo = cc => geo === "all" || ccRegion(cc) === geo;
-  $("#flows-sub").textContent = "Last 7 days · share of attack traffic Cloudflare mitigated · updated " + relTime(t.generated) + (geo === "all" ? "" : " · flows touching " + geoLabel());
+  $("#flows-sub").textContent = "Where DDoS traffic Cloudflare mitigated came from and went, as a share of the week's total. Updated " + relTime(t.generated) + (geo === "all" ? "." : "; showing flows that touch " + geoLabel() + ".");
 
   // Country fills: L3 target or source share; in flow mode, the share of L7 traffic each country received.
   const fill = {};
@@ -2381,6 +2386,39 @@ function renderFlows(){
   const pairs = (t.l7Pairs || []).filter(p => inGeo(p.from) || inGeo(p.to));
   const arcs = pairs.filter(p => p.from !== p.to).slice(0, FLOW_ARCS);
   const amax = Math.max(0.0001, ...arcs.map(p => p.pct));
+  flowModel = { fill, fmax, shade, pairs, arcs, amax };
+  if (flowGlobe && flowAimedGeo !== geo) aimFlowGlobe();
+  flowAimedGeo = geo;
+  if (flowGlobeState === "failed") renderFlatFlows(flowModel); else updateFlowGlobe();
+
+  // Ranked list for the active mode.
+  let rows;
+  if (flowMode === "flows"){
+    $("#flows-list-h").textContent = "Top HTTP flows · source → target";
+    rows = pairs.slice(0, 10).map(p => { const i = arcs.indexOf(p); return '<li' + (i >= 0 ? ' data-fi="' + i + '"' : "") + ' tabindex="0"><span class="fl-cc">' + (p.from === p.to ? esc(ccName(p.to)) + ' <span class="rw-dim">(within)</span>' : esc(ccName(p.from)) + ' <span class="fl-to">→</span> ' + esc(ccName(p.to))) + '</span><b>' + flowPct(p.pct) + "</b></li>"; });
+  } else {
+    const list = ((flowMode === "targets" ? t.l3Targets : t.l3Origins) || []).filter(r => inGeo(r.cc));
+    $("#flows-list-h").textContent = (flowMode === "targets" ? "Most targeted" : "Largest sources") + " · L3/L4" + (geo === "all" ? "" : " · " + geoLabel());
+    rows = list.slice(0, 10).map(r => '<li><a class="fl-cc" href="#country/' + esc(r.cc) + '">' + esc(ccName(r.cc)) + "</a><b>" + flowPct(r.pct) + "</b></li>");
+  }
+  $("#flows-list").innerHTML = rows.length ? rows.join("") : '<li class="rw-dim">Nothing for ' + esc(geoLabel()) + " in Cloudflare's top 50.</li>";
+
+  const top = (l, f) => (l && l.length) ? f(l[0]) : "—";
+  const long = (t.duration || []).find(d => /> ?3 ?h/.test(d.label));
+  $("#flows-stats").innerHTML =
+    '<div><span>Most common L3/L4 vector</span><b>' + esc(top((t.l3 || {}).global, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
+    '<div><span>Most targeted industry (L7)</span><b>' + esc(top(t.l7Industries, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
+    '<div><span>L3/L4 attacks lasting over 3 hours</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
+  $("#flows-note").innerHTML = "Shares of DDoS traffic Cloudflare mitigated on its own network, worldwide, over the last 7 days, not individual attacks and not live. " +
+    "A source country is where attack traffic came from (often botnets or proxies), not who is behind it. Arcs show the top " + arcs.length + " HTTP flows between different countries; traffic within one country is ringed. " +
+    'Data: <a href="https://radar.cloudflare.com/security/network-layer" target="_blank" rel="noopener">Cloudflare Radar</a> (CC BY-NC 4.0). Per-country detail is on <a href="#country">Geo Intel</a>.';
+}
+// Fallback 2D map (no WebGL / CDN): Equal Earth SVG with arcs or country fills.
+function renderFlatFlows(m){
+  const mapEl = $("#flows-map");
+  mapEl.hidden = false; $("#flows-globe").hidden = true;
+  if (flowGeoState === "idle"){ loadFlowGeo(); }
+  const { fill, shade, pairs, arcs, amax } = m;
   const y0 = flowXY(0, 84)[1], y1 = flowXY(0, FLOW_LAT_MIN)[1];
   const land = flowGeo ? flowGeo.shapes.map(s => '<path class="fl-land' + (s.cc && fill[s.cc] ? " on" : "") + '"' + (s.cc && fill[s.cc] ? ' style="fill-opacity:' + shade(s.cc).toFixed(2) + '"' : "") + ' d="' + s.d + '"><title>' + esc(s.cc ? ccName(s.cc) + (fill[s.cc] ? " · " + flowPct(fill[s.cc]) : "") : "") + "</title></path>").join("") : "";
   let arcSvg = "", dots = "";
@@ -2406,33 +2444,123 @@ function renderFlows(){
     esc(flowMode === "flows" ? "World map of the top source-to-target country flows of HTTP DDoS traffic, last 7 days" : "World map shaded by share of network-layer DDoS traffic " + (flowMode === "targets" ? "targeting" : "originating in") + " each country, last 7 days") + '">' +
     '<g class="fl-lands">' + land + "</g>" + '<g class="fl-arcs">' + arcSvg + "</g><g>" + dots + "</g></svg>";
 
-  // Ranked list for the active mode.
-  let rows;
-  if (flowMode === "flows"){
-    $("#flows-list-h").textContent = "Top HTTP flows · source → target";
-    rows = pairs.slice(0, 10).map(p => { const i = arcs.indexOf(p); return '<li' + (i >= 0 ? ' data-fi="' + i + '"' : "") + ' tabindex="0"><span class="fl-cc">' + (p.from === p.to ? esc(ccName(p.to)) + ' <span class="rw-dim">(within)</span>' : esc(ccName(p.from)) + ' <span class="fl-to">→</span> ' + esc(ccName(p.to))) + '</span><b>' + flowPct(p.pct) + "</b></li>"; });
-  } else {
-    const list = ((flowMode === "targets" ? t.l3Targets : t.l3Origins) || []).filter(r => inGeo(r.cc));
-    $("#flows-list-h").textContent = (flowMode === "targets" ? "Most targeted" : "Largest sources") + " · L3/L4" + (geo === "all" ? "" : " · " + geoLabel());
-    rows = list.slice(0, 10).map(r => '<li><a class="fl-cc" href="#country/' + esc(r.cc) + '">' + esc(ccName(r.cc)) + "</a><b>" + flowPct(r.pct) + "</b></li>");
-  }
-  $("#flows-list").innerHTML = rows.length ? rows.join("") : '<li class="rw-dim">Nothing for ' + esc(geoLabel()) + " in Cloudflare's top 50.</li>";
-
-  const top = (l, f) => (l && l.length) ? f(l[0]) : "—";
-  const long = (t.duration || []).find(d => /> ?3 ?h/.test(d.label));
-  $("#flows-stats").innerHTML =
-    '<div><span>Most common L3/L4 vector</span><b>' + esc(top((t.l3 || {}).global, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
-    '<div><span>Most targeted industry (L7)</span><b>' + esc(top(t.l7Industries, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
-    '<div><span>L3/L4 attacks lasting over 3 hours</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
-  $("#flows-note").innerHTML = "Shares of DDoS traffic Cloudflare mitigated on its own network, worldwide, over the last 7 days, not individual attacks and not live. " +
-    "A source country is where attack traffic came from (often botnets or proxies), not who is behind it. Arcs show the top " + arcs.length + " HTTP flows between different countries; traffic within one country is ringed. " +
-    'Data: <a href="https://radar.cloudflare.com/security/network-layer" target="_blank" rel="noopener">Cloudflare Radar</a> (CC BY-NC 4.0). Per-country detail is on <a href="#country">Geo Intel</a>.';
 }
 function setFlowHover(i){
   flowHover = i;
+  if (flowGlobe) flowGlobe.arcColor(flowGlobe.arcColor()); // re-evaluates colours against flowHover
   const svg = $("#flows-map svg");
   if (svg) svg.classList.toggle("has-hover", i != null);
   document.querySelectorAll("#flows [data-fi]").forEach(el => el.classList.toggle("hi", i != null && el.dataset.fi === String(i)));
+}
+// Night-Earth globe, styled after a dark "hero" header: pink→violet arcs for HTTP flows with rings
+// pulsing on targets, or columns for L3/L4 target/source shares. Rendered only while the Brief is
+// the active tab and the card is on screen.
+const FLOW_ARC_COLORS = ["rgba(255,79,216,0.15)", "rgba(255,79,216,0.95)", "rgba(140,107,255,0.95)"];
+async function initFlowGlobe(){
+  if (flowGlobeState !== "idle") return;
+  const el = $("#flows-globe");
+  if (!el || !webglOk()){ flowGlobeState = "failed"; if (flowModel) renderFlatFlows(flowModel); return; }
+  flowGlobeState = "loading";
+  try {
+    if (typeof Globe === "undefined") await loadScript(GLOBE_JS, GLOBE_SRI);
+    loadAtlas(); // centroids for countries missing from CENTROIDS
+    const g = new Globe(el, { animateIn: !REDUCED_MOTION })
+      .backgroundColor("rgba(0,0,0,0)")
+      .globeImageUrl(GLOBE_TEXTURE)
+      .showAtmosphere(true).atmosphereColor("#5b8cff").atmosphereAltitude(0.24)
+      .width(el.clientWidth).height(el.clientHeight)
+      .arcStartLat("sLat").arcStartLng("sLng").arcEndLat("eLat").arcEndLng("eLng")
+      .arcColor(d => flowHover == null || String(d.i) === String(flowHover) ? FLOW_ARC_COLORS : ["rgba(255,79,216,0.04)", "rgba(255,79,216,0.12)"])
+      .arcStroke(d => d.w)
+      .arcAltitudeAutoScale(0.3)
+      .arcDashLength(0.5).arcDashGap(0.9).arcDashInitialGap(d => d.i * 0.13 % 1)
+      .arcDashAnimateTime(REDUCED_MOTION ? 0 : 3200)
+      .arcLabel(d => '<div class="flows-tip"><b>' + esc(ccName(d.from)) + " → " + esc(ccName(d.to)) + "</b><br>" + flowPct(d.pct) + " of HTTP DDoS traffic</div>")
+      .onArcHover(d => setFlowHover(d ? d.i : null))
+      .ringLat("lat").ringLng("lng")
+      .ringColor(() => t => "rgba(255,120,220," + (1 - t).toFixed(2) + ")")
+      .ringMaxRadius(d => d.r).ringPropagationSpeed(1.6).ringRepeatPeriod(REDUCED_MOTION ? 0 : 1400)
+      .pointLat("lat").pointLng("lng").pointAltitude("alt").pointRadius("rad").pointColor("color")
+      .pointLabel(d => '<div class="flows-tip"><b>' + esc(ccName(d.cc)) + "</b><br>" + esc(d.label) + "</div>")
+      .pointsMerge(false);
+    const ctl = g.controls();
+    ctl.enableZoom = false; // keep page scroll working over the globe
+    ctl.autoRotate = !REDUCED_MOTION; ctl.autoRotateSpeed = 0.35;
+    if (window.ResizeObserver) new ResizeObserver(() => { if (el.clientWidth) g.width(el.clientWidth).height(el.clientHeight); }).observe(el);
+    if (window.IntersectionObserver) new IntersectionObserver(es => { flowVisible = es[0].isIntersecting; syncFlowAnimation(); }).observe(el);
+    flowGlobe = g;
+    flowGlobeState = "ready";
+    el.hidden = false; $("#flows-map").hidden = true;
+    aimFlowGlobe(0); flowAimedGeo = geo;
+    updateFlowGlobe();
+    syncFlowAnimation();
+    startFlowParticles();
+  } catch (e){
+    flowGlobeState = "failed";
+    console.warn("Attack flows globe unavailable, using the flat map", e);
+    if (flowModel) renderFlatFlows(flowModel);
+  }
+}
+function aimFlowGlobe(ms){
+  if (!flowGlobe) return;
+  const b = REGION_VIEW[geo] || REGION_VIEW.all;
+  flowGlobe.pointOfView(geo === "all" ? { lat: 22, lng: -45, altitude: 2.35 } : { lat: (b[2] + b[3]) / 2, lng: (b[0] + b[1]) / 2, altitude: 2.1 }, REDUCED_MOTION ? 0 : (ms == null ? 1200 : ms));
+}
+function updateFlowGlobe(){
+  if (!flowGlobe || !flowModel) return;
+  const { fill, fmax, pairs, arcs, amax } = flowModel;
+  if (flowMode === "flows"){
+    flowGlobe.arcsData(arcs.map((p, i) => { const a = posOf(p.from), b = posOf(p.to); return a && b ? { i, sLat: a[0], sLng: a[1], eLat: b[0], eLng: b[1], from: p.from, to: p.to, pct: p.pct, w: 0.25 + 1.1 * Math.sqrt(p.pct / amax) } : null; }).filter(Boolean));
+    const tgt = {};
+    pairs.forEach(p => { tgt[p.to] = (tgt[p.to] || 0) + p.pct; });
+    const tmax = Math.max(0.0001, ...Object.values(tgt));
+    flowGlobe.ringsData(Object.entries(tgt).slice(0, 12).map(([cc, v]) => { const q = posOf(cc); return q ? { lat: q[0], lng: q[1], r: 2 + 6 * Math.sqrt(v / tmax) } : null; }).filter(Boolean));
+    flowGlobe.pointsData(Object.entries(tgt).map(([cc, v]) => { const q = posOf(cc); return q ? { cc, lat: q[0], lng: q[1], alt: 0.01, rad: 0.25 + 0.9 * Math.sqrt(v / tmax), color: "#ff8ae2", label: "Received " + flowPct(v) + " of the listed HTTP flows" } : null; }).filter(Boolean));
+  } else {
+    flowGlobe.arcsData([]); flowGlobe.ringsData([]);
+    const tag = flowMode === "targets" ? "of L3/L4 attack traffic targeted here" : "of L3/L4 attack traffic came from here";
+    flowGlobe.pointsData(Object.entries(fill).map(([cc, v]) => { const q = posOf(cc); return q ? { cc, lat: q[0], lng: q[1], alt: 0.02 + 0.55 * Math.sqrt(v / fmax), rad: 0.55, color: flowMode === "targets" ? "#ff6fd8" : "#8c6bff", label: flowPct(v) + " " + tag } : null; }).filter(Boolean));
+  }
+}
+function syncFlowAnimation(){
+  if (!flowGlobe) return;
+  const on = activeTab === "brief" && flowVisible && !document.hidden;
+  if (on) flowGlobe.resumeAnimation(); else flowGlobe.pauseAnimation();
+  flowParticlesOn = on && !REDUCED_MOTION;
+  if (flowParticlesOn) requestAnimationFrame(drawFlowParticles);
+}
+// Background "constellation": slow drifting dots joined by faint lines when close.
+let flowParticles = [], flowParticlesOn = false, flowParticleT = 0;
+function startFlowParticles(){
+  const c = $("#flows-particles");
+  if (!c) return;
+  // Resizing a canvas clears it, so redraw a still frame right away (matters while paused).
+  const size = () => { const r = c.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1); c.width = r.width * dpr; c.height = r.height * dpr; c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0); if (flowParticles.length) drawFlowParticles(0, true); };
+  size();
+  if (window.ResizeObserver) new ResizeObserver(size).observe(c);
+  flowParticles = Array.from({ length: 70 }, () => ({ x: Math.random(), y: Math.random(), vx: (Math.random() - .5) * .00012, vy: (Math.random() - .5) * .00012, r: Math.random() * 1.4 + .4, pink: Math.random() < .3 }));
+  drawFlowParticles(0, true);
+}
+function drawFlowParticles(ts, once){
+  const c = $("#flows-particles");
+  if (!c || (!flowParticlesOn && !once)) return;
+  const ctx = c.getContext("2d"), w = c.clientWidth, h = c.clientHeight;
+  const dt = flowParticleT ? Math.min(50, ts - flowParticleT) : 16;
+  flowParticleT = ts;
+  ctx.clearRect(0, 0, w, h);
+  for (const p of flowParticles){
+    if (!once){ p.x = (p.x + p.vx * dt + 1) % 1; p.y = (p.y + p.vy * dt + 1) % 1; }
+  }
+  ctx.lineWidth = 0.6;
+  for (let i = 0; i < flowParticles.length; i++) for (let j = i + 1; j < flowParticles.length; j++){
+    const a = flowParticles[i], b = flowParticles[j], dx = (a.x - b.x) * w, dy = (a.y - b.y) * h, d = Math.hypot(dx, dy);
+    if (d < 90){ ctx.strokeStyle = "rgba(140,160,255," + (0.18 * (1 - d / 90)).toFixed(3) + ")"; ctx.beginPath(); ctx.moveTo(a.x * w, a.y * h); ctx.lineTo(b.x * w, b.y * h); ctx.stroke(); }
+  }
+  for (const p of flowParticles){
+    ctx.fillStyle = p.pink ? "rgba(255,120,220,0.85)" : "rgba(150,175,255,0.7)";
+    ctx.beginPath(); ctx.arc(p.x * w, p.y * h, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  if (flowParticlesOn && !once) requestAnimationFrame(drawFlowParticles);
 }
 function wireFlows(){
   const el = $("#flows");
@@ -2445,6 +2573,7 @@ function wireFlows(){
   el.addEventListener("mouseover", over);
   el.addEventListener("focusin", over);
   el.addEventListener("mouseleave", () => setFlowHover(null));
+  document.addEventListener("visibilitychange", syncFlowAnimation);
 }
 
 /* ---------------- Markdown export ---------------- */
