@@ -87,7 +87,7 @@
     </div>
     </div>
   </div>
-  <div class="kpis" id="kpis" data-only-tabs="brief telegram actors iocs" aria-label="Key metrics"></div>
+  <div class="kpis" id="kpis" data-only-tabs="brief telegram iocs" aria-label="Key metrics"></div>
   <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center; margin-top:var(--space-5)">
     <button type="button" class="btn btn-primary" data-action="download-brief">Download brief as Markdown</button>
     <span class="copy-status"></span>
@@ -376,6 +376,7 @@
   </div>
   <div class="card vn-tablewrap" style="padding:0">
     <table class="table vn-table">
+      <colgroup><col class="vc-vuln"><col class="vc-pri"><col class="vc-cvss"><col class="vc-epss"><col class="vc-exp"><col class="vc-fix"><col class="vc-edge"></colgroup>
       <thead><tr><th>Vulnerability</th><th>Priority</th><th>CVSS</th><th>EPSS</th><th>Exploitation</th><th>Fix</th><th>Edge</th></tr></thead>
       <tbody id="vuln-list"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
     </table>
@@ -421,55 +422,85 @@
 </section>
 
 <!-- 05 ACTORS -->
-<section id="actors" class="section" hidden>
+<section id="actors" class="section ac-page" hidden>
   <div class="section-head">
     <div class="section-head-left">
       <span class="apj-num">06 / Actors</span>
-      <h2 style="margin:0">Threat actor tracker</h2>
-      <span class="apj-eyebrow">sorted by latest observed activity · follows the region filter</span>
+      <h2 style="margin:0">Threat actors</h2>
+      <p class="rw-qualifier">Hand-curated profiles of the groups most relevant here, a community alias directory, and activity measured from this app&rsquo;s own feeds. Attribution and relationships are the sources&rsquo; assessments, shown with their confidence.</p>
+      <p class="rw-fresh" id="ac-fresh"></p>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Curated baseline profiles — click a card to expand. Maintained by hand, not auto-refreshed. A region shows the actors known to target it, plus those that target everywhere.</p>
-  <div class="actor-grid" id="actors-list"></div>
 
-  <div class="section-head" style="margin-top:var(--space-8)">
-    <div class="section-head-left">
-      <span class="apj-num">Community sheet</span>
-      <h3 style="margin:0">APT groups &amp; operations directory</h3>
-      <span class="apj-eyebrow" id="apt-meta">loading…</span>
-    </div>
-    <div class="section-controls">
-      <select id="apt-tab-filter" class="input" style="max-width:170px" aria-label="Country tab"><option value="all">All countries</option></select>
-      <input id="apt-search" class="input search-input" type="search" placeholder="Any name or alias — APT36, Fancy Bear, Mint Sandstorm…" aria-label="Search groups and aliases">
+  <div class="kpis rw-kpis" id="ac-kpis" aria-label="Actor metrics"></div>
+
+  <div class="ac-searchbar">
+    <input id="ac-q" class="input" type="search" placeholder="Search actor, alias, malware or campaign" aria-label="Search actors, aliases, malware or campaigns" autocomplete="off">
+    <div class="apj-seg" role="tablist" aria-label="Actor views">
+      <button type="button" role="tab" data-actab="tracked" aria-pressed="true" aria-selected="true">Tracked actors</button>
+      <button type="button" role="tab" data-actab="directory" aria-pressed="false" aria-selected="false">Alias directory</button>
+      <button type="button" role="tab" data-actab="trends" aria-pressed="false" aria-selected="false">Activity trends</button>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Maps each vendor's name for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0). Checked daily for edits. With a region picked, lists groups whose <em>Targets</em> name a country in it (search looks across all groups). The sheet itself warns that attribution is complex and its mappings are best-effort — and it has had few additions since 2024, so treat it as an alias reference, not current activity. Click a row for operations, malware, and sources.</p>
-  <div class="card elev-sm" style="padding:var(--space-5);margin-bottom:var(--space-4)">
-    <div class="card-kicker">Recent sheet changes</div>
-    <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
+
+  <div id="ac-tracked" class="ac-view">
+    <div class="ac-filters">
+      <select id="ac-f-type" class="input" aria-label="Actor type"><option value="">All types</option></select>
+      <select id="ac-f-sector" class="input" aria-label="Targeted sector"><option value="">All sectors</option></select>
+      <select id="ac-f-ttp" class="input" aria-label="Technique"><option value="">All techniques</option></select>
+      <label class="rw-check"><input type="checkbox" id="ac-f-recent"> In reports, last 30 days</label>
+      <label class="rw-check"><input type="checkbox" id="ac-f-follow"> Followed only</label>
+    </div>
+    <p class="rw-dim ac-count" id="ac-count" aria-live="polite"></p>
+    <div class="ac-grid" id="actors-list"></div>
   </div>
-  <div class="card table-wrap" style="padding:0">
-    
-    <div class="vuln-scroll">
-      <table class="table vuln-table apt-table">
-        <colgroup><col style="width:20%"><col style="width:11%"><col style="width:37%"><col style="width:8%"><col style="width:24%"></colgroup>
-        <thead><tr><th>Group</th><th>Sheet tab</th><th>Also known as</th><th>MITRE</th><th>Targets</th></tr></thead>
+
+  <div id="ac-directory" class="ac-view" hidden>
+    <div class="ac-filters">
+      <select id="apt-tab-filter" class="input" aria-label="Sheet tab"><option value="all">All sheet tabs</option></select>
+      <span class="rw-dim" id="apt-meta">loading…</span>
+    </div>
+    <p class="rw-panel-note" style="margin:var(--space-2) 0 var(--space-3)">Vendor names for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0), checked daily. These are directory <em>records</em>, not distinct actors: the same group can appear under several country tabs, and the sheet itself says its mappings are best-effort. Vendor names in one row may be partial overlaps rather than the same group. MITRE notes the same about associated group names. With a region picked, lists records whose targets name a country in it; a search looks across all records.</p>
+    <div class="rw-tablebar"><span id="apt-count" aria-live="polite"></span><div class="rw-pager" id="apt-pager"></div></div>
+    <div class="card table-wrap" style="padding:0">
+      <table class="table apt-table ac-table">
+        <colgroup><col style="width:22%"><col style="width:11%"><col style="width:37%"><col style="width:8%"><col style="width:22%"></colgroup>
+        <thead><tr><th>Group</th><th>Sheet tab</th><th>Vendor names (as listed)</th><th>MITRE</th><th>Targets</th></tr></thead>
         <tbody id="apt-list"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
+    <div class="card elev-sm" style="padding:var(--space-5);margin-top:var(--space-4)">
+      <div class="card-kicker">Recent sheet changes</div>
+      <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
+    </div>
   </div>
 
-  <div class="rank-grid">
-    <div class="card elev-sm" style="padding:var(--space-6)">
-      <div class="card-kicker">Top 10 — Ransomware claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· leak-site volume</span></div>
-      <div id="rank-ransomware"></div>
+  <div id="ac-trends" class="ac-view" hidden>
+    <div class="rw-panels ac-trend-panels">
+      <div class="card rw-panel">
+        <div class="rw-panel-head"><span class="card-kicker">Most observed ransomware claims</span><span class="rw-panel-sub" id="ac-rw-sub"></span></div>
+        <div class="rw-bars" id="ac-rw-rank"></div>
+        <p class="rw-panel-note" id="ac-rw-note"></p>
+      </div>
+      <div class="card rw-panel">
+        <div class="rw-panel-head"><span class="card-kicker">Tracked actors named in reports</span><span class="rw-panel-sub" id="ac-men-sub"></span></div>
+        <div class="rw-bars" id="ac-men-rank"></div>
+        <p class="rw-panel-note">Counts items in this app&rsquo;s news feeds and Telegram/Mastodon posts that name a tracked actor or one of its aliases (whole-word match). A mention is not attribution.</p>
+      </div>
     </div>
-    <div class="card elev-sm" style="padding:var(--space-6)">
-      <div class="card-kicker">Top 10 — DDoS claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· hacktivist collectives</span></div>
-      <div id="rank-ddos"></div>
+    <div class="rank-grid">
+      <div class="card elev-sm" style="padding:var(--space-5)">
+        <div class="card-kicker">Selected ransomware operations</div>
+        <p class="rw-panel-note">Curated context, not a ranking: figures are as quoted in public reporting and use different periods and counting rules, so they aren&rsquo;t comparable with each other.</p>
+        <div id="rank-ransomware"></div>
+      </div>
+      <div class="card elev-sm" style="padding:var(--space-5)">
+        <div class="card-kicker">Selected hacktivist DDoS groups</div>
+        <p class="rw-panel-note">Curated context, not a ranking: mostly self-reported claim volumes and shares from different reports and periods. Not confirmed attack counts.</p>
+        <div id="rank-ddos"></div>
+      </div>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12px;margin-top:var(--space-2)">Curated snapshot, not live-collected — self-reported/leak-site claim volumes, not confirmed breach or attack counts. Hover a row for context.</p>
 </section>
 
 <!-- 07 IOCS -->

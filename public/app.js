@@ -64,54 +64,83 @@ function normGeo(key){
 // `geo` is who each actor is known to target, from its `targets` text: region keys (lowercase),
 // country codes (uppercase), or "global" for actors that hit every region. It drives the region
 // filter and the Geo Intel page — keep it in step with `targets` when editing a profile.
+// `rels` are typed relationships ([name, type, note?], types in REL_LABEL): put a name under "alias"
+// only when sources treat it as the same group; vendor clusters that partly overlap go under
+// "overlap". `ttps` are [ATT&CK id, official ATT&CK name, behaviour it's mapped from] — use the name
+// attack.mitre.org gives, not a paraphrase. `type` drives the badge and filter; `sectors` the filter;
+// `match` adds extra spellings for report mentions. Bump ACTORS_EDITED when editing.
 const ACTORS = [
-  { name:"Transparent Tribe", geo:["IN"], aka:"APT36 · Earth Karkaddan", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Attributed with high confidence to a Pakistan-nexus threat actor.",
+  { name:"Transparent Tribe", geo:["IN"], type:"Espionage", rels:[["APT36","alias"],["Earth Karkaddan","alias"]], origin:"Pakistan-nexus", motive:"Espionage", sectors:["government","defense","education"], p:"P1",
+    conf:"Attributed with high confidence to a Pakistan-nexus threat actor.",
     overview:"Long-running espionage cluster focused on Indian government, defense, and education sectors. Extensive use of Crimson RAT and ElizaRAT delivered via spearphishing and cloned government portals.",
-    targets:"Indian military/defense, government, education", ttps:[["T1566.001","Spearphishing attachment"],["T1204.002","User execution"],["T1105","Ingress tool transfer"],["T1071.001","Web protocols C2"]],
+    targets:"Indian military/defense, government, education",
+    ttps:[["T1566.001","Phishing: Spearphishing Attachment","Lure documents delivering Crimson RAT / ElizaRAT"],["T1204.002","User Execution: Malicious File","Victim opens the lure attachment"],["T1105","Ingress Tool Transfer","Second-stage RAT download"],["T1071.001","Application Layer Protocol: Web Protocols","HTTP(S) command and control"]],
     mit:"App & API Protector for portal spoofing/web delivery; Akamai MFA against credential phishing; EAA to reduce exposed access surface." },
-  { name:"SideCopy", geo:["IN","AF"], aka:"—", origin:"Pakistan-nexus", motive:"Espionage", p:"P1", conf:"Assessed with medium-high confidence as Pakistan-nexus; overlaps with Transparent Tribe.",
+  { name:"SideCopy", geo:["IN","AF"], type:"Espionage", rels:[["Transparent Tribe","overlap"]], origin:"Pakistan-nexus", motive:"Espionage", sectors:["defense","government","transport","energy"], p:"P1",
+    conf:"Assessed with medium-high confidence as Pakistan-nexus; overlaps with Transparent Tribe.",
     overview:"Targets Indian defense, government, Railways, and Oil & Gas entities, mimicking SideWinder TTPs (hence the name); shifted from HTA to MSI staging with reflective DLL loading. 'Operation XENOFISCAL' (mid-2026) extended targeting to Afghanistan's Ministry of Finance via XenoRAT.",
-    targets:"Indian defense, government, Railways, Oil & Gas; Afghan MoF (XENOFISCAL)", ttps:[["T1566.002","Spearphishing link"],["T1218.005","Mshta abuse"],["T1036","Masquerading"]],
+    targets:"Indian defense, government, Railways, Oil & Gas; Afghan MoF (XENOFISCAL)",
+    ttps:[["T1566.002","Phishing: Spearphishing Link","Links to HTA/MSI staging payloads"],["T1218.005","System Binary Proxy Execution: Mshta","HTA staging via mshta"],["T1036","Masquerading","Mimics SideWinder lures and file names"]],
     mit:"App & API Protector WAF; Client-Side Protection & Compliance for injected script detection; Akamai MFA." },
-  { name:"RedEcho", geo:["IN"], aka:"threat activity group linked to APT41 infra", origin:"China-nexus", motive:"Espionage / Pre-positioning", p:"P1", conf:"Attributed with medium confidence to a China-nexus actor (Recorded Future reporting).",
+  { name:"RedEcho", geo:["IN"], type:"Espionage", rels:[["APT41","association","shared infrastructure reported"]], origin:"China-nexus", motive:"Espionage / Pre-positioning", sectors:["energy","critical infrastructure","transport"], p:"P1",
+    conf:"Attributed with medium confidence to a China-nexus actor (Recorded Future reporting).",
     overview:"Targeted Indian power sector and critical infrastructure with ShadowPad implants — assessed as strategic pre-positioning rather than immediate disruption.",
-    targets:"Indian power grid, ports, critical infrastructure", ttps:[["T1133","External remote services"],["T1071","C2 over app-layer protocols"],["T1105","ShadowPad delivery"]],
+    targets:"Indian power grid, ports, critical infrastructure",
+    ttps:[["T1133","External Remote Services","Access via exposed remote services"],["T1071","Application Layer Protocol","ShadowPad command and control"],["T1105","Ingress Tool Transfer","ShadowPad implant delivery"]],
     mit:"Guardicore Segmentation to contain lateral movement in OT-adjacent networks; EAA for third-party access; Security Services IR Retainer." },
-  { name:"APT41", geo:["apj","IN"], aka:"Winnti · Wicked Panda · Brass Typhoon", origin:"China-nexus", motive:"Espionage + Financial", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
+  { name:"APT41", geo:["apj","IN"], type:"Espionage", rels:[["Wicked Panda","alias"],["Brass Typhoon","alias"],["Winnti","overlap","some vendors track Winnti Group separately"]], origin:"China-nexus", motive:"Espionage + Financial", sectors:["telecom","healthcare","technology","gaming"], p:"P2",
+    conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Dual-mission group conducting state espionage and financially motivated intrusions. Known for software supply-chain compromises, web-facing app exploitation, and web shells across APJ.",
-    targets:"Telecom, healthcare, software, gaming across APJ incl. India", ttps:[["T1195.002","Supply chain compromise"],["T1190","Exploit public-facing app"],["T1505.003","Web shell"]],
+    targets:"Telecom, healthcare, software, gaming across APJ incl. India",
+    ttps:[["T1195.002","Supply Chain Compromise: Compromise Software Supply Chain","Trojanised software updates"],["T1190","Exploit Public-Facing Application","Web-facing application exploitation"],["T1505.003","Server Software Component: Web Shell","Web shells for persistence"]],
     mit:"App & API Protector against edge exploitation; Guardicore Segmentation; Client-Side Protection & Compliance for supply-chain script risk." },
-  { name:"CL-STA-1062", geo:["apj","TW"], aka:"UAT-7237", origin:"China-nexus", motive:"Espionage (possible IAB)", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor; initial-access-broker role assessed with low confidence.",
+  { name:"CL-STA-1062", geo:["apj","TW"], type:"Espionage", rels:[["UAT-7237","overlap","vendor clusters reported to overlap"]], origin:"China-nexus", motive:"Espionage (possible IAB)", sectors:["energy","government","defense","technology"], p:"P2",
+    conf:"Attributed with high confidence to a China-nexus threat actor; initial-access-broker role assessed with low confidence.",
     overview:"State-sponsored espionage cluster active since at least March 2022. Uses the TinyRCT backdoor, web shells, and credential theft; expanded in 2026 from Taiwan web-hosting infrastructure into Southeast Asian electricity/water utilities and government/military targets via SoftEther VPN and Mimikatz.",
-    targets:"Southeast Asian energy infrastructure, government", ttps:[["T1505.003","Web shell"],["T1003","Credential dumping"],["T1190","Exploit public-facing app"]],
+    targets:"Southeast Asian energy infrastructure, government",
+    ttps:[["T1505.003","Server Software Component: Web Shell","Web shells on hosting infrastructure"],["T1003","OS Credential Dumping","Mimikatz"],["T1190","Exploit Public-Facing Application","Initial access via exposed services"]],
     mit:"App & API Protector WAF; Guardicore Segmentation; Akamai MFA; Security Services IR Retainer." },
-  { name:"Lazarus Group", geo:["global","IN","KR"], aka:"Hidden Cobra · Diamond Sleet", origin:"DPRK", motive:"Financial + Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
+  { name:"Lazarus Group", geo:["global","IN","KR"], type:"Espionage", rels:[["Hidden Cobra","alias","US government umbrella name"],["Diamond Sleet","overlap","Microsoft tracks a subset"]], match:["Lazarus"], origin:"DPRK", motive:"Financial + Espionage", sectors:["finance","crypto","defense"], p:"P2",
+    conf:"Attributed with high confidence to the DPRK.",
     overview:"Prolific DPRK operator: cryptocurrency theft, bank intrusions (incl. 2018 Cosmos Bank ATM cashout in India), supply-chain attacks, and defense-sector espionage across APJ. 2026 watering-hole campaign exploited a South Korean banking-software zero-day (AnySign4PC) via 15 compromised legitimate sites, affecting 70+ organizations.",
-    targets:"Financial services, crypto exchanges, defense — APJ-wide incl. India", ttps:[["T1195","Supply chain compromise"],["T1566","Phishing (job-lure)"],["T1621","MFA request abuse"]],
+    targets:"Financial services, crypto exchanges, defense — APJ-wide incl. India",
+    ttps:[["T1195","Supply Chain Compromise","Software supply-chain delivery"],["T1566","Phishing","Fake job-offer lures"],["T1189","Drive-by Compromise","2026 watering-hole campaign via compromised sites"]],
     mit:"Akamai MFA (phish-proof); App & API Protector for exchange/API abuse; Client-Side Protection & Compliance for skimming." },
-  { name:"Kimsuky", geo:["apj","KR","JP"], aka:"Emerald Sleet · APT43", origin:"DPRK", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to the DPRK.",
+  { name:"Kimsuky", geo:["apj","KR","JP"], type:"Espionage", rels:[["Emerald Sleet","alias"],["APT43","overlap","Mandiant cluster overlapping Kimsuky activity"]], origin:"DPRK", motive:"Espionage", sectors:["government","education","think tanks"], p:"P2",
+    conf:"Attributed with high confidence to the DPRK.",
     overview:"Credential-harvesting and spearphishing specialist targeting think tanks, academia, and government policy circles in Korea, Japan, and wider APJ, incl. India-focused policy targets. 2026 campaign compromised South Korean groupware vendors' mail servers to pivot into customer credentials via new Gomir-family backdoor variants.",
-    targets:"Think tanks, academia, government policy — KR/JP/APJ", ttps:[["T1598.003","Credential-harvest spearphishing"],["T1078","Valid accounts"],["T1114","Email collection"]],
+    targets:"Think tanks, academia, government policy — KR/JP/APJ",
+    ttps:[["T1598.003","Phishing for Information: Spearphishing Link","Credential-harvesting links"],["T1078","Valid Accounts","Reuse of harvested credentials"],["T1114","Email Collection","Mailbox access after compromise"]],
     mit:"Akamai MFA; EAA for identity-aware access; App & API Protector." },
-  { name:"Mustang Panda", geo:["apj"], aka:"Earth Preta · Stately Taurus", origin:"China-nexus", motive:"Espionage", p:"P2", conf:"Attributed with high confidence to a China-nexus threat actor.",
+  { name:"Mustang Panda", geo:["apj"], type:"Espionage", rels:[["Earth Preta","alias"],["Stately Taurus","alias"]], origin:"China-nexus", motive:"Espionage", sectors:["government","ngo","transport"], p:"P2",
+    conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Espionage operator heavily active against Southeast Asian governments; signature PlugX/Korplug delivery via phishing and infected USB media.",
-    targets:"SEA governments, NGOs, shipping", ttps:[["T1566.002","Spearphishing link"],["T1091","Removable media replication"],["T1574.002","DLL side-loading"]],
+    targets:"SEA governments, NGOs, shipping",
+    ttps:[["T1566.002","Phishing: Spearphishing Link","Links to PlugX archives"],["T1091","Replication Through Removable Media","Infected USB media"],["T1574.001","Hijack Execution Flow: DLL","PlugX DLL side-loading (merged into T1574.001 in ATT&CK v17)"]],
     mit:"Guardicore Segmentation; EAA; App & API Protector." },
-  { name:"Mysterious Team Bangladesh", geo:["IN"], aka:"MTB", origin:"Bangladesh (hacktivist)", motive:"Ideological — DDoS", p:"P1", conf:"Self-attributed hacktivist collective; claims assessed with medium confidence.",
+  { name:"Mysterious Team Bangladesh", geo:["IN"], type:"Hacktivist DDoS", rels:[["MTB","alias"]], origin:"Bangladesh (hacktivist)", motive:"Ideological — DDoS", sectors:["government","finance","aviation"], p:"P1",
+    conf:"Self-attributed hacktivist collective; claims assessed with medium confidence.",
     overview:"Hacktivist DDoS collective repeatedly targeting Indian government, financial, and airline web properties with Layer 7 floods and defacements, typically announced on Telegram.",
-    targets:"Indian gov portals, BFSI, aviation", ttps:[["T1498","Network DoS"],["T1499.004","Application-layer DoS"],["T1491","Defacement"]],
+    targets:"Indian gov portals, BFSI, aviation",
+    ttps:[["T1498","Network Denial of Service","Volumetric floods (claimed)"],["T1499.002","Endpoint Denial of Service: Service Exhaustion Flood","Layer 7 HTTP floods against web portals"],["T1491","Defacement","Website defacements"]],
     mit:"App & API Protector + rate controls for L7 floods; Prolexic-class network-layer defense; bot visibility." },
-  { name:"NoName057(16)", geo:["eu","JP","IT"], aka:"—", origin:"Russia-aligned (hacktivist)", motive:"Ideological — DDoS", p:"P2", conf:"Self-attributed pro-Russia collective; high confidence in DDoS activity, low in membership claims.",
+  { name:"NoName057(16)", geo:["eu","JP","IT"], type:"Hacktivist DDoS", rels:[["ServerKillers","association","joint campaigns reported"]], match:["NoName057"], origin:"Russia-aligned (hacktivist)", motive:"Ideological — DDoS", sectors:["government","transport","finance","media"], p:"P2",
+    conf:"Self-attributed pro-Russia collective; high confidence in DDoS activity, low in membership claims.",
     overview:"Crowdsourced 'DDoSia' Layer 7 attack platform; the single most prolific hacktivist DDoS brand by claim volume, generating an estimated 40.5% of all recorded hacktivist DDoS claims in H1 2026. Primarily targets Europe (incl. a Feb 2026 campaign against Italian government sites tied to the Milano Cortina Winter Olympics) but launched a sustained #OpJapan campaign in Aug 2026 against Japanese transport, government, shipping, insurance, and media targets — a useful bellwether for hacktivist DDoS tradecraft reaching APJ.",
-    targets:"Government, transport, BFSI web properties", ttps:[["T1498.002","Reflection amplification"],["T1499.004","Application-layer DoS"]],
+    targets:"Government, transport, BFSI web properties",
+    ttps:[["T1499.002","Endpoint Denial of Service: Service Exhaustion Flood","DDoSia HTTP request floods against web pages"],["T1498.001","Network Denial of Service: Direct Network Flood","DDoSia TCP SYN floods"],["T1583.005","Acquire Infrastructure: Botnet","Volunteer-run DDoSia clients"]],
     mit:"App & API Protector; edge rate controls; upstream network-layer scrubbing." },
-  { name:"Keymous+", geo:["global","IN"], aka:"EliteStress (affiliated DDoS-for-hire platform)", origin:"Self-described North Africa-based; DDoS-as-a-service", motive:"Ideological (claimed) / commercial DDoS-for-hire", p:"P1", conf:"Self-attributed hacktivist brand; analysts assess a dual hacktivist/commercial-DaaS identity with medium confidence — claimed attack volumes are largely self-reported and unverified.",
+  { name:"Keymous+", geo:["global","IN"], type:"Hacktivist DDoS", rels:[["EliteStress","affiliate","affiliated DDoS-for-hire platform"],["DieNet","association","joint campaigns reported"]], match:["Keymous"], origin:"Self-described North Africa-based; DDoS-as-a-service", motive:"Ideological (claimed) / commercial DDoS-for-hire", sectors:["government","healthcare"], p:"P1",
+    conf:"Self-attributed hacktivist brand; analysts assess a dual hacktivist/commercial-DaaS identity with medium confidence — claimed attack volumes are largely self-reported and unverified.",
     overview:"Emerged 2023, ramping sharply through 2025 with 700+ claimed DDoS attacks (249 independently confirmed). Became the most aggressive DDoS actor against Indian public healthcare during the 2025-26 India-Pakistan tension period, repeatedly flooding AIIMS and Safdarjung Hospital web infrastructure; no confirmed data breach.",
-    targets:"Indian government and public healthcare portals (AIIMS, Safdarjung); opportunistic global targeting", ttps:[["T1498","Network DoS"],["T1499.004","Application-layer DoS"],["T1583.005","Botnet / DDoS-for-hire infrastructure"]],
+    targets:"Indian government and public healthcare portals (AIIMS, Safdarjung); opportunistic global targeting",
+    ttps:[["T1498","Network Denial of Service","Volumetric floods (claimed)"],["T1499.002","Endpoint Denial of Service: Service Exhaustion Flood","Layer 7 floods against hospital and government portals"],["T1583.005","Acquire Infrastructure: Botnet","DDoS-for-hire infrastructure"]],
     mit:"App & API Protector + rate controls for L7 floods; Prolexic-class network-layer defense; bot visibility." },
-  { name:"RuskiNet", geo:["US","CA","IL","GB","TR","IN"], aka:"—", origin:"Russia-aligned hacktivist (Eastern Europe)", motive:"Ideological — geopolitical", p:"P2", conf:"Self-attributed pro-Russia hacktivist collective; not yet assessed as state-linked. Confidence in claimed scale/impact is low.",
+  { name:"RuskiNet", geo:["US","CA","IL","GB","TR","IN"], type:"Hacktivist DDoS", rels:[], origin:"Russia-aligned hacktivist (Eastern Europe)", motive:"Ideological — geopolitical", sectors:["government","critical infrastructure"], p:"P2",
+    conf:"Self-attributed pro-Russia hacktivist collective; not yet assessed as state-linked. Confidence in claimed scale/impact is low.",
     overview:"Blends DDoS, data leaks, and phishing against government and critical-infrastructure targets, opportunistically tying campaigns (incl. 'Operation Trinetara') to geopolitical flashpoints. India named among its targets alongside the US, Canada, Israel, UK, and Turkey; activity trend assessed as declining since mid-2026.",
-    targets:"Government and critical infrastructure — US, Canada, Israel, UK, Turkey, India", ttps:[["T1498","Network DoS"],["T1566","Phishing"],["T1567","Exfiltration over web services"]],
+    targets:"Government and critical infrastructure — US, Canada, Israel, UK, Turkey, India",
+    ttps:[["T1498","Network Denial of Service","DDoS claims"],["T1566","Phishing","Phishing campaigns"],["T1567","Exfiltration Over Web Service","Data-leak claims"]],
     mit:"App & API Protector + rate controls; Akamai MFA against credential phishing; Guardicore Segmentation." }
 ];
 const ACTOR_META = {
@@ -121,52 +150,60 @@ const ACTOR_META = {
   "NoName057(16)": ["2026-08-20"], "Keymous+": ["2026-05-15"], "RuskiNet": ["2026-03-01"]
 };
 const GLOBAL_ACTORS = [
-  { name:"Qilin", geo:["global","IN"], aka:"Agenda", origin:"Russia-aligned RaaS", motive:"Ransomware", p:"P2", last:"2026-08-10",
+  { name:"Qilin", geo:["global","IN"], type:"Ransomware", rels:[["Agenda","alias","original ransomware name"]], origin:"Russia-aligned RaaS", motive:"Ransomware", sectors:["cross-sector"], p:"P2", last:"2026-08-10",
     conf:"RaaS operation; affiliate attribution varies. Assessed with high confidence as the dominant ransomware brand by victim volume.",
     overview:"Ransomware-as-a-service operation leading leak-site victim counts (2,100+ claimed victims) amid ecosystem consolidation. Strong Linux/ESXi capability; actively exploiting Palo Alto PAN-OS auth-bypass flaws for initial access; recurring Indian victims.",
-    targets:"Cross-sector, global — recurring Indian victims", ttps:[["T1486","Data encrypted for impact"],["T1567","Exfiltration over web services"],["T1078","Valid accounts"]],
+    targets:"Cross-sector, global — recurring Indian victims",
+    ttps:[["T1486","Data Encrypted for Impact","Windows and Linux/ESXi encryptors"],["T1567","Exfiltration Over Web Service","Data theft before encryption"],["T1078","Valid Accounts","Affiliate use of stolen credentials"]],
     mit:"Guardicore Segmentation to limit blast radius; Akamai MFA against affiliate credential access; Security Services IR Retainer." },
-  { name:"DragonForce", geo:["global","IN"], aka:"—", origin:"RaaS cartel", motive:"Ransomware", p:"P2", last:"2026-07-14",
+  { name:"DragonForce", geo:["global","IN"], type:"Ransomware", rels:[], origin:"RaaS cartel", motive:"Ransomware", sectors:["cross-sector","manufacturing"], p:"P2", last:"2026-07-14",
     conf:"Self-styled ransomware 'cartel'; affiliate structure assessed with medium confidence.",
     overview:"Aggressive RaaS/cartel model absorbing affiliates from disrupted brands. Active APJ + Indian manufacturing claims.",
-    targets:"Cross-sector, global + APJ incl. India", ttps:[["T1486","Data encrypted for impact"],["T1133","External remote services"],["T1567.002","Exfil to cloud storage"]],
+    targets:"Cross-sector, global + APJ incl. India",
+    ttps:[["T1486","Data Encrypted for Impact","Encryption payload"],["T1133","External Remote Services","Access via exposed remote services"],["T1567.002","Exfiltration Over Web Service: Exfiltration to Cloud Storage","Data staged to cloud storage"]],
     mit:"Guardicore Segmentation; EAA to replace exposed remote access; IR Retainer." },
-  { name:"Cl0p", geo:["global","IN"], aka:"TA505-linked", origin:"Russia-nexus eCrime", motive:"Extortion (mass exploitation)", p:"P2", last:"2026-07-20",
+  { name:"Cl0p", geo:["global","IN"], type:"Ransomware", rels:[["TA505","association","reported link; not the same group"]], match:["Clop"], origin:"Russia-nexus eCrime", motive:"Extortion (mass exploitation)", sectors:["cross-sector","healthcare"], p:"P2", last:"2026-07-20",
     conf:"Attributed with high confidence to a Russia-nexus eCrime group.",
-    overview:"Specialist in mass exploitation of managed file transfer and enterprise software zero-days (MOVEit, Oracle EBS, and a 2026 PTC Windchill/FlexPLM RCE campaign claiming 1,200+ victims across 54 countries) rather than individual intrusions — cumulative claimed victim count has passed 1,190 since the group's Aug 2020 emergence. Claimed Indian healthcare victims.",
-    targets:"Enterprises via file-transfer/ERP zero-days — global incl. India", ttps:[["T1190","Exploit public-facing application"],["T1567","Exfiltration over web services"]],
+    overview:"Specialist in mass exploitation of managed file transfer and enterprise software zero-days (MOVEit, Oracle EBS, and a 2026 PTC Windchill/FlexPLM RCE campaign) rather than individual intrusions; each campaign has produced hundreds of claimed victims. Cumulative totals differ widely by tracker and counting rule (campaign vs leak-site posts), so none is quoted here — see the measured claim counts on the Activity trends tab. Claimed Indian healthcare victims.",
+    targets:"Enterprises via file-transfer/ERP zero-days — global incl. India",
+    ttps:[["T1190","Exploit Public-Facing Application","Mass exploitation of file-transfer and ERP zero-days"],["T1567","Exfiltration Over Web Service","Bulk data theft for extortion"]],
     mit:"App & API Protector WAF with rapid virtual-patch rules on MFT/ERP CVEs; Guardicore Segmentation." },
-  { name:"Scattered Spider", geo:["na","eu","US","GB"], aka:"UNC3944 · Octo Tempest", origin:"eCrime (native-English)", motive:"Extortion", p:"P1", last:"2026-07-02",
+  { name:"Scattered Spider", geo:["na","eu","US","GB"], type:"Extortion", rels:[["UNC3944","alias"],["Octo Tempest","alias"],["ShinyHunters","overlap","ecosystem overlap reported"]], origin:"eCrime (native-English)", motive:"Extortion", sectors:["retail","insurance","aviation","technology"], p:"P1", last:"2026-07-02",
     conf:"High confidence in TTP cluster; loose membership (The Com) complicates attribution.",
     overview:"Social-engineering-led intrusions: helpdesk impersonation, MFA-reset abuse, SIM swap, then SaaS data theft and ESXi ransomware deployment with RaaS partners. Core UK/US members have faced arrests, extraditions, and guilty pleas through mid-2026 (incl. the TfL breach), though the loose 'The Com' membership model limits disruption impact.",
-    targets:"Retail, insurance, aviation, SaaS-heavy enterprises", ttps:[["T1656","Impersonation (helpdesk)"],["T1621","MFA request generation"],["T1078.004","Cloud accounts"]],
+    targets:"Retail, insurance, aviation, SaaS-heavy enterprises",
+    ttps:[["T1656","Impersonation","Help-desk impersonation"],["T1621","Multi-Factor Authentication Request Generation","MFA fatigue and reset abuse"],["T1078.004","Valid Accounts: Cloud Accounts","Abuse of SaaS and cloud identities"]],
     mit:"Akamai MFA (phish-proof FIDO2); EAA identity-aware access; helpdesk verification playbooks + IR Retainer." },
-  { name:"ShinyHunters", geo:["global"], aka:"UNC6040 overlap", origin:"eCrime collective", motive:"Data-theft extortion", p:"P1", last:"2026-07-14",
+  { name:"ShinyHunters", geo:["global"], type:"Extortion", rels:[["UNC6040","overlap"],["Scattered Spider","overlap","ecosystem overlap reported (“SLSH”)"]], origin:"eCrime collective", motive:"Data-theft extortion", sectors:["technology","cross-sector"], p:"P1", last:"2026-07-14",
     conf:"Cluster overlaps with Scattered Spider ecosystem; assessed with medium confidence.",
     overview:"Large-scale SaaS data-theft extortion via vishing, malicious connected apps, and OAuth token abuse; 2026 activity includes Oracle PeopleSoft PeopleTools zero-day exploitation and growing ecosystem overlap with Scattered Spider and Lapsus$ (tracked by some vendors as 'SLSH').",
-    targets:"Salesforce/SaaS tenants of global enterprises", ttps:[["T1566.004","Voice phishing"],["T1528","Steal application access tokens"],["T1530","Data from cloud storage"]],
+    targets:"Salesforce/SaaS tenants of global enterprises",
+    ttps:[["T1566.004","Phishing: Spearphishing Voice","Vishing of SaaS users"],["T1528","Steal Application Access Token","Malicious connected apps and OAuth tokens"],["T1530","Data from Cloud Storage","Bulk SaaS data export"]],
     mit:"Akamai MFA; Client-Side Protection & Compliance; SaaS OAuth-app governance." },
-  { name:"Sandworm", geo:["eu","UA","US"], aka:"APT44 · Seashell Blizzard", origin:"Russia (GRU)", motive:"Espionage + Disruption", p:"P1", last:"2026-07-13",
+  { name:"Sandworm", geo:["eu","UA","US"], type:"Destructive", rels:[["APT44","alias"],["Seashell Blizzard","alias"]], origin:"Russia (GRU)", motive:"Espionage + Disruption", sectors:["critical infrastructure","energy","government"], p:"P1", last:"2026-07-13",
     conf:"Attributed with high confidence to Russia's GRU.",
     overview:"Destructive and espionage operations against critical infrastructure; known for exploiting vulnerable and misconfigured edge routers.",
-    targets:"Critical infrastructure, energy, government — primarily Europe/US, tradecraft globally relevant", ttps:[["T1190","Exploit public-facing application"],["T1542","Pre-OS/router implants"],["T1485","Data destruction"]],
+    targets:"Critical infrastructure, energy, government — primarily Europe/US, tradecraft globally relevant",
+    ttps:[["T1190","Exploit Public-Facing Application","Exploitation of edge devices and routers"],["T1542.001","Pre-OS Boot: System Firmware","Firmware implants on network devices (e.g. Cyclops Blink)"],["T1485","Data Destruction","Wiper deployment"]],
     mit:"Guardicore Segmentation; hardened edge via App & API Protector; DNS posture review." },
-  { name:"Salt Typhoon", geo:["global","US","SG"], aka:"Earth Estries · GhostEmperor overlap", origin:"China-nexus", motive:"Espionage", p:"P2", last:"2026-05-15",
+  { name:"Salt Typhoon", geo:["global","US","SG"], type:"Espionage", rels:[["Earth Estries","overlap"],["GhostEmperor","overlap"]], origin:"China-nexus", motive:"Espionage", sectors:["telecom"], p:"P2", last:"2026-05-15",
     conf:"Attributed with high confidence to a China-nexus threat actor.",
     overview:"Telecom-focused espionage penetrating carrier core networks and lawful-intercept systems across multiple countries, including APJ operators (Singapore's four national carriers confirmed compromised, per Feb 2026 national assessments). Suspected — not formally confirmed — in a Feb 2026 breach of the FBI's DCSNet wiretap system.",
-    targets:"Telecom carriers and ISPs, global incl. APJ", ttps:[["T1190","Exploit public-facing application"],["T1078","Valid accounts"],["T1020","Automated exfiltration"]],
+    targets:"Telecom carriers and ISPs, global incl. APJ",
+    ttps:[["T1190","Exploit Public-Facing Application","Carrier edge-device exploitation"],["T1078","Valid Accounts","Use of captured credentials"],["T1020","Automated Exfiltration","Bulk collection from carrier systems"]],
     mit:"Guardicore Segmentation of management planes; EAA for vendor access; App & API Protector." },
-  { name:"TheGentlemen", geo:["global","IN"], aka:"—", origin:"eCrime (RaaS)", motive:"Ransomware", p:"P1", last:"2026-08-10",
+  { name:"TheGentlemen", geo:["global","IN"], type:"Ransomware", rels:[["Qilin","association","reportedly emerged from a former Qilin affiliate"]], match:["The Gentlemen"], origin:"eCrime (RaaS)", motive:"Ransomware", sectors:["healthcare","manufacturing","education"], p:"P1", last:"2026-08-10",
     conf:"Emerging group; assessed with medium confidence as an affiliate-driven RaaS with deliberate India targeting.",
     overview:"Newer leak-site operation (emerged Aug 2025 from a former Qilin affiliate), now the #2 most prolific ransomware brand globally by published victim count, with a striking India concentration across healthcare, manufacturing, and education victims spanning 60+ countries.",
-    targets:"Indian healthcare, manufacturing, education; wider Asia", ttps:[["T1486","Data encrypted for impact"],["T1490","Inhibit system recovery"]],
+    targets:"Indian healthcare, manufacturing, education; wider Asia",
+    ttps:[["T1486","Data Encrypted for Impact","Encryption payload"],["T1490","Inhibit System Recovery","Backup and shadow-copy deletion"]],
     mit:"Guardicore Segmentation; Akamai MFA; Security Services IR Retainer; leak-site monitoring." }
 ];
-/* ---------------- Top 10 rankings (curated, self-reported/leak-site claim volumes — not confirmed breach counts) ---------------- */
+/* ---------------- Selected groups (curated context, self-reported/leak-site volumes — not confirmed counts, not a ranking) ---------------- */
 const RANSOMWARE_RANK = [
   { name:"Qilin", stat:"~1,300–2,100+ claimed victims all-time (source-dependent); 50+ countries", note:"Dominant RaaS brand by leak-site volume through most of 2026; recurring Indian victims." },
   { name:"Akira", stat:"1,400+ claimed victims all-time; $245M+ ransom collected", note:"Consistently top-2–3 on the leaderboard; strong Linux/ESXi capability." },
-  { name:"Cl0p", stat:"1,190+ claimed victims since Aug 2020", note:"Mass-exploitation model (MOVEit, Oracle EBS, 2026 PTC Windchill/FlexPLM — 1,200+ victims/54 countries in that campaign alone) rather than individual intrusions." },
+  { name:"Cl0p", stat:"Hundreds of claimed victims per mass-exploitation campaign", note:"MOVEit, Oracle EBS and 2026 PTC Windchill/FlexPLM campaigns. Cumulative totals differ by tracker and counting rule, so none is quoted." },
   { name:"TheGentlemen", stat:"~300 claimed victims across 66+ countries since Aug 2025", note:"Fastest-growing brand of 2026; by some trackers overtook Qilin for #1 activity by June 2026. Pronounced India concentration (healthcare, manufacturing, education)." },
   { name:"Play", stat:"~900+ claimed victims all-time", note:"Steady top-10 mainstay; exploits public-facing app and RDP/VPN access." },
   { name:"RansomHub", stat:"~840+ claimed victims all-time", note:"Rapid 2024–25 riser via ex-ALPHV/LockBit affiliates; activity reported thinning after the 2025 DragonForce/Scattered Spider affiliate dispute." },
@@ -187,18 +224,25 @@ const DDOS_RANK = [
   { name:"CyberArmyofRussia_Reborn (CARR)", stat:"Recurring claims vs water/energy control systems", note:"Overlaps with Sandworm-adjacent tradecraft narratives; claims not independently confirmed." },
   { name:"Arabian Ghosts", stat:"Part of the 12-group cluster behind 74.6% of a 149-attack Middle-East-conflict surge", note:"Regional hacktivist collective, Middle East-conflict-driven claims." }
 ];
+// Curated context lists, deliberately unnumbered: their figures come from different reports, periods
+// and counting rules, so ordering them would imply a comparison the data can't support. Measured
+// rankings live on the Activity trends tab (renderAcTrends()).
 function renderRankings(){
   const rEl = $("#rank-ransomware"), dEl = $("#rank-ddos");
-  const rowHtml = (g, i) =>
-    '<div class="claimrank-row" title="' + esc(g.note) + '"><span class="rank-n">' + (i+1) + "</span>" +
-    '<span class="rank-body"><span class="rank-label">' + esc(g.name) + "</span>" +
-    '<span class="rank-count">' + esc(g.stat) + "</span></span></div>";
+  const rowHtml = g => '<div class="ac-sel-row"><div class="ac-sel-name">' + esc(g.name) + '</div><div class="ac-sel-stat">' + esc(g.stat) + '</div><div class="rw-dnote">' + esc(g.note) + "</div></div>";
   if (rEl) rEl.innerHTML = RANSOMWARE_RANK.map(rowHtml).join("");
   if (dEl) dEl.innerHTML = DDOS_RANK.map(rowHtml).join("");
 }
+const ACTORS_EDITED = "2026-10-05"; // bump when ACTORS / GLOBAL_ACTORS are edited
+// Relationship types for `rels` ([name, type, note?]). Only "alias" names count as the same group
+// (search, ransomware.live matching, report mentions); the rest are shown, never merged.
+const REL_LABEL = { alias: "Alias / historical name", overlap: "Partially overlapping activity", affiliate: "Subgroup or affiliate", association: "Reported association", disputed: "Disputed mapping" };
+// URL id for #actors/<id>: "NoName057(16)" → "noname057-16".
+function actorSlug(name){ return String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
 function mergedActors(){
   return ACTORS.map(a => Object.assign({}, a, { last: (ACTOR_META[a.name] || ["2025-01-01"])[0] }))
-    .concat(GLOBAL_ACTORS)
+    .concat(GLOBAL_ACTORS.map(a => Object.assign({}, a)))
+    .map(a => Object.assign(a, { id: actorSlug(a.name), aka: (a.rels || []).filter(r => r[1] === "alias").map(r => r[0]).join(" · ") || "—" }))
     .sort((a,b) => String(b.last).localeCompare(String(a.last)));
 }
 function actorTargetsRegion(a, key){
@@ -244,10 +288,11 @@ let CURRENT_ACTORS = [];
 const TAB_IDS = ["brief", "country", "ransomware", "vulnerabilities", "telegram", "actors", "iocs"];
 // "#country" is the Geo Intel overview, "#country/IN" its India profile; every other hash is a bare
 // tab id. "#map" is the old Map tab, which Geo Intel absorbed — old links land on the overview.
+// "#actors/apt41" opens that curated profile (id = actorSlug(name)).
 function parseHash(h){
   let [id, arg] = String(h || "").replace(/^#/, "").split("/");
   if (id === "map") id = "country";
-  return { id, cc: /^[A-Za-z]{2}$/.test(arg || "") ? arg.toUpperCase() : null };
+  return { id, cc: id === "country" && /^[A-Za-z]{2}$/.test(arg || "") ? arg.toUpperCase() : null, actor: id === "actors" && arg ? decodeURIComponent(arg).toLowerCase() : null };
 }
 let activeTab = "brief";
 function showTab(id, opts){
@@ -295,10 +340,11 @@ function wireTabs(){
     a.addEventListener("click", e => { e.preventDefault(); showTab(id); });
   });
   window.addEventListener("hashchange", () => {
-    const { id, cc } = parseHash(location.hash);
+    const { id, cc, actor } = parseHash(location.hash);
     if (!TAB_IDS.includes(id)) return;
     if (id === "country" && cc !== cpCC && (cc || activeTab === "country")){ setCountry(cc, { skipRender: id !== activeTab }); window.scrollTo(0, 0); }
-    if (id !== activeTab) showTab(id, { skipHash: true });
+    if (id !== activeTab) showTab(id, { skipHash: true }); // closes any open drawer (and resets #actors/x)
+    if (actor && rwDrawerKey !== "actor:" + actor) openActor(actor);
   });
 }
 
@@ -777,6 +823,7 @@ function closeDrawer(){
   d.hidden = true; $("#rw-drawer-back").hidden = true;
   document.body.classList.remove("rw-drawer-open");
   rwDrawerKey = null;
+  if (activeTab === "actors" && /^#actors\//.test(location.hash)) history.replaceState(null, "", "#actors");
   // Focus goes back to the row/button that opened it; the table itself was never re-rendered or scrolled.
   if (rwDrawerReturn && document.contains(rwDrawerReturn)) rwDrawerReturn.focus({ preventScroll: true });
   rwDrawerReturn = null;
@@ -847,8 +894,8 @@ function openGroup(g){
     '<p><button type="button" class="btn btn-secondary rw-filter-group" data-g="' + esc(g) + '">Filter table to ' + esc(g) + "</button></p>" +
     '<h4 class="rw-h">Profile</h4>' + (a
       ? '<p class="rw-desc">' + esc(a.overview) + '</p><dl class="rw-dl">' + dRow("Also known as", esc(a.aka || "—")) + dRow("Origin / motive", esc(a.origin + " · " + a.motive)) +
-        dRow("Techniques (ATT&CK)", a.ttps.map(t => '<span class="mono">' + esc(t[0]) + "</span> " + esc(t[1])).join("<br>")) + dRow("Mitigation", esc(a.mit)) + "</dl>" +
-        '<p class="rw-dnote">' + esc(a.conf) + " Curated by hand; last reviewed " + esc(fmtLast(a.last)) + ".</p>"
+        dRow("Techniques (ATT&CK)", a.ttps.map(t => '<span class="mono">' + esc(t[0]) + "</span> " + esc(t[1])).join("<br>")) + dRow("Mitigation (general)", esc(a.mit)) + "</dl>" +
+        '<p class="rw-dnote">' + esc(a.conf) + " Curated by hand; latest reported activity " + esc(fmtLast(a.last)) + '.</p><p><a href="#actors/' + esc(a.id) + '">Full actor profile →</a></p>'
       : '<p class="rw-dim">No curated profile for this group yet.</p>') +
     '<p class="rw-links"><a href="https://www.ransomware.live/group/' + esc(encodeURIComponent(g)) + '" target="_blank" rel="noopener">ransomware.live group page</a>' +
       ' · <a href="https://www.cisa.gov/stopransomware/resources" target="_blank" rel="noopener">CISA #StopRansomware advisories</a>' +
@@ -1001,37 +1048,239 @@ function originFlag(origin){
   if (o.includes("bangladesh")) return "🇧🇩";
   return "🌐";
 }
+/* ---------------- Actors page: tracked profiles, alias directory, activity trends ----------------
+   Profiles are the hand-curated ACTORS/GLOBAL_ACTORS above; everything "live" on a profile (report
+   mentions, leak-site claims, CVEs named alongside, IOCs) is matched from /api/data at render time
+   by actorNames() — a mention is shown as a mention, never as attribution. Profiles open in the
+   shared side drawer at #actors/<id> (id = actorSlug(name)), so they can be linked to. */
+const ACTOR_NAME_STOP = new Set(["agenda"]); // aliases that are ordinary words
+let acTab = (() => { try { const t = localStorage.getItem("apjti.acTab"); return ["tracked", "directory", "trends"].includes(t) ? t : "tracked"; } catch (_){ return "tracked"; } })();
+let acQ = "", acF = { type: "", sector: "", ttp: "", recent: false, follow: false };
+let aptPage = 0;
+const APT_PAGE_SIZE = 25;
+function loadFollow(){ try { const f = JSON.parse(localStorage.getItem("apjti.actorFollow") || "[]"); return Array.isArray(f) ? f : []; } catch (_){ return []; } }
+let acFollow = loadFollow();
+function actorById(id){ return mergedActors().find(a => a.id === id); }
+function actorNames(a){
+  return [...new Set([a.name, ...(a.rels || []).filter(r => r[1] === "alias").map(r => r[0]), ...(a.match || [])])]
+    .filter(n => n.length >= 4 && !ACTOR_NAME_STOP.has(n.toLowerCase()));
+}
+function nameRe(n){ return new RegExp("(^|[^a-z0-9])" + n.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "[\\s_-]?") + "(?![a-z0-9])", "i"); }
+let acIdx = null;
+// Per actor: feed/social items naming it, its leak-site claims, and IOCs tagged with its names.
+function actorIndex(){
+  if (acIdx && acIdx.items === allItems && acIdx.victims === rwVictims && acIdx.iocs === iocItems) return acIdx;
+  const map = new Map();
+  for (const a of mergedActors()){
+    const res = actorNames(a).map(nameRe);
+    const hit = t => res.some(r => r.test(t));
+    const keys = new Set([a.name, ...(a.rels || []).filter(r => r[1] === "alias").map(r => r[0]), ...(a.match || [])].map(groupKey));
+    map.set(a.id, {
+      news: allItems.filter(i => hit((i.title || "") + " " + (i.desc || ""))),
+      social: [...telegramItems, ...rwNewsItems].filter(i => hit((i.title || "") + " " + (i.desc || ""))),
+      claims: rwVictims.filter(v => keys.has(groupKey(v.group))),
+      iocs: iocItems.filter(i => hit((i.threat || "") + " " + (i.tags || []).join(" ")))
+    });
+  }
+  acIdx = { items: allItems, victims: rwVictims, iocs: iocItems, map };
+  return acIdx;
+}
+function acRecent(list, days, field = "date"){
+  const from = Date.now() - days * 86400000;
+  return list.filter(x => { const d = x[field]; const t = d instanceof Date ? d.getTime() : Date.parse(d); return !isNaN(t) && t >= from; });
+}
+// Which name or field a search matched, so a hit on an alias or malware family says so.
+function acSearchHit(a, q){
+  if (!q) return { field: "" };
+  const has = s => String(s || "").toLowerCase().includes(q);
+  if (has(a.name)) return { field: "name" };
+  const rel = (a.rels || []).find(r => has(r[0]));
+  if (rel) return { field: REL_LABEL[rel[1]].toLowerCase(), text: rel[0] };
+  const g = aptMatch(a);
+  if (g){
+    // Say when the hit comes from the sheet row this profile is filed under (e.g. RedEcho → Winnti Group).
+    const via = g.name.toLowerCase() !== a.name.toLowerCase() ? ", filed under " + g.name : "";
+    const al = (g.aliases || []).find(x => has(x.n));
+    if (al) return { field: "vendor name (sheet" + via + ")", text: al.n + (al.v ? " · " + al.v : "") };
+    if (has(g.malware)) return { field: "malware (sheet" + via + ")", text: String(g.malware).split(/[,;]/).map(s => s.trim()).find(has) || g.malware };
+    const op = (g.ops || []).find(has);
+    if (op) return { field: "operation (sheet" + via + ")", text: op };
+  }
+  if (has(a.overview)) return { field: "summary" };
+  if ((a.ttps || []).some(t => has(t[0]) || has(t[1]))) return { field: "technique" };
+  return null;
+}
+const AC_TYPE_CLASS = { "Espionage": "esp", "Ransomware": "rw", "Hacktivist DDoS": "hk", "Extortion": "ex", "Destructive": "ds" };
+function acTypeBadge(a){ return '<span class="ac-type ac-type-' + (AC_TYPE_CLASS[a.type] || "x") + '">' + esc(a.type || a.motive) + "</span>"; }
+function visibleActors(){
+  const idx = actorIndex().map, q = acQ.trim().toLowerCase();
+  return mergedActors().map(a => ({ a, hit: acSearchHit(a, q) })).filter(({ a, hit }) =>
+    hit && (q || actorTargetsRegion(a, geo)) &&
+    (!acF.type || a.type === acF.type) &&
+    (!acF.sector || (a.sectors || []).includes(acF.sector)) &&
+    (!acF.ttp || (a.ttps || []).some(t => t[0] === acF.ttp || t[0].startsWith(acF.ttp + "."))) &&
+    (!acF.recent || acRecent([...idx.get(a.id).news, ...idx.get(a.id).social], 30).length) &&
+    (!acF.follow || acFollow.includes(a.id)));
+}
 function renderActors(){
-  const list = mergedActors().filter(a => actorTargetsRegion(a, geo));
-  CURRENT_ACTORS = list;
-  $("#actors-list").innerHTML = list.length ? list.map(actorCardHtml).join("") : '<div class="empty">No curated profiles target ' + esc(geoLabel()) + " yet — the directory below covers far more groups.</div>";
+  CURRENT_ACTORS = mergedActors().filter(a => actorTargetsRegion(a, geo));
   renderTopTtps();
   renderRankings();
+  if (!$("#actors-list")) return;
+  document.querySelectorAll("[data-actab]").forEach(b => { const on = b.dataset.actab === acTab; b.setAttribute("aria-pressed", String(on)); b.setAttribute("aria-selected", String(on)); });
+  ["tracked", "directory", "trends"].forEach(t => { const el = $("#ac-" + t); if (el) el.hidden = t !== acTab; });
+  const all = mergedActors();
+  const fill = (sel, values, cur, label) => { const el = $(sel); if (!el) return; el.innerHTML = '<option value="">' + label + "</option>" + values.map(v => '<option value="' + esc(v[0]) + '">' + esc(v[1]) + "</option>").join(""); el.value = cur; };
+  fill("#ac-f-type", [...new Set(all.map(a => a.type))].sort().map(t => [t, t]), acF.type, "All types");
+  fill("#ac-f-sector", [...new Set(all.flatMap(a => a.sectors || []))].sort().map(s => [s, s[0].toUpperCase() + s.slice(1)]), acF.sector, "All targeted sectors");
+  const ttps = new Map(); all.forEach(a => (a.ttps || []).forEach(t => ttps.set(t[0], t[1])));
+  fill("#ac-f-ttp", [...ttps].sort((x, y) => x[0].localeCompare(y[0])).map(([id, n]) => [id, id + " · " + n]), acF.ttp, "All techniques");
+  $("#ac-f-recent").checked = acF.recent; $("#ac-f-follow").checked = acF.follow;
+  renderAcFresh(); renderAcKpis();
+  if (acTab === "tracked") renderAcTracked();
+  else if (acTab === "directory") renderApt();
+  else renderAcTrends();
 }
-function actorCardHtml(a, idx){
-  return (
-    '<div class="card elev-sm actor-card" data-i="' + idx + '">' +
-      '<div class="actor-hd">' +
-        "<div><div class=\"card-title\">" + esc(a.name) + '</div><div class="aka">' + esc(a.aka) + "</div></div>" +
-        '<span class="tag ' + ((a.geo || []).includes("global") ? "tag-neutral" : "tag-outline") + '">' + esc(actorScopeLabel(a)) + "</span>" +
-      "</div>" +
-      '<div class="actor-tags">' +
-        '<span class="tag tag-neutral">⏱ ' + fmtLast(a.last) + "</span>" +
-        '<span class="tag tag-neutral">' + originFlag(a.origin) + " " + esc(a.origin) + "</span>" +
-        '<span class="tag tag-neutral">' + esc(a.motive) + "</span>" +
-      "</div>" +
-      '<div class="card-meta">' + esc(a.overview) + "</div>" +
-      '<div class="det">' +
-        '<div class="row"><span class="lbl">Targets</span><br>' + esc(a.targets) + "</div>" +
-        '<div class="row"><span class="lbl">Key TTPs (MITRE ATT&amp;CK)</span><br>' +
-          a.ttps.map(t => '<span class="ttp" title="' + esc(t[1]) + '">' + esc(t[0]) + "</span> " + esc(t[1])).join("<br>") +
-        "</div>" +
-        '<div class="row"><span class="lbl">Mitigation</span><br>' + esc(a.mit) + "</div>" +
-        aptCuratedRow(a) +
-        '<div class="conf">' + esc(a.conf) + "</div>" +
-      "</div>" +
-    "</div>"
+function renderAcFresh(){
+  const el = $("#ac-fresh");
+  if (!el) return;
+  el.innerHTML = mergedActors().length + " curated profiles, edited by hand (list last edited " + esc(fmtDay(ACTORS_EDITED)) + ")" +
+    (aptGroups ? " · alias directory checked " + esc(fmtDay(aptMeta && aptMeta.checkedAt)) : "") +
+    (DATA.generated ? " · report mentions from feeds collected " + esc(relTime(DATA.generated)) : "");
+}
+function renderAcKpis(){
+  const el = $("#ac-kpis");
+  if (!el) return;
+  const idx = actorIndex().map, scope = mergedActors().filter(a => actorTargetsRegion(a, geo));
+  const recent = scope.filter(a => Date.parse(a.last) >= Date.now() - 90 * 86400000).length;
+  const mentioned = scope.filter(a => acRecent([...idx.get(a.id).news, ...idx.get(a.id).social], 7).length);
+  const followed = acFollow.map(actorById).filter(Boolean);
+  const fMentioned = followed.filter(a => acRecent([...idx.get(a.id).news, ...idx.get(a.id).social], 7).length);
+  const tile = (label, value, sub) => '<div class="kpi"><div class="l">' + esc(label) + '</div><div class="v">' + value + '</div><div class="s">' + sub + "</div></div>";
+  el.innerHTML =
+    tile("Tracked profiles", String(scope.length), (geo === "all" ? "All regions" : "Targeting " + esc(geoLabel())) + " · of " + mergedActors().length + " curated") +
+    tile("Recent reported activity", String(recent), "Profiles whose latest reported activity is within 90 days") +
+    tile("Named in new reports", String(mentioned.length), "Tracked actors mentioned in feeds or Telegram, last 7 days") +
+    (followed.length
+      ? tile("Followed actors", String(fMentioned.length) + "<small>of " + followed.length + "</small>", "Followed and mentioned in the last 7 days")
+      : tile("Followed actors", "—", "Use Follow on a profile to track it here"));
+}
+function acCardHtml({ a, hit }){
+  const im = actorIndex().map.get(a.id);
+  const rep30 = acRecent([...im.news, ...im.social], 30).length, cl30 = acRecent(im.claims, 30).length;
+  const followed = acFollow.includes(a.id);
+  return '<article class="card ac-card" data-acid="' + esc(a.id) + '">' +
+    '<div class="ac-card-hd"><h3 class="ac-name">' + esc(a.name) + "</h3>" + acTypeBadge(a) + "</div>" +
+    (hit && hit.text ? '<div class="ac-hit">Matched ' + esc(hit.field) + ": <b>" + esc(hit.text) + "</b></div>" : hit && hit.field && hit.field !== "name" ? '<div class="ac-hit">Matched in ' + esc(hit.field) + "</div>" : "") +
+    '<dl class="ac-facts"><dt>Assessed affiliation</dt><dd>' + esc(a.origin) + "</dd><dt>Reported targets</dt><dd>" + esc(a.targets) + "</dd></dl>" +
+    '<p class="ac-sum">' + esc(a.overview) + "</p>" +
+    '<div class="ac-meta"><span>Latest reported activity: <b>' + esc(fmtLast(a.last)) + "</b></span><span>" + esc(actorScopeLabel(a)) + "</span></div>" +
+    '<div class="ac-live">' +
+      (rep30 ? '<span class="tag tag-outline">' + rep30 + " report" + (rep30 > 1 ? "s" : "") + " · 30 days</span>" : '<span class="tag tag-neutral">No reports · 30 days</span>') +
+      (im.claims.length ? '<span class="tag tag-outline">' + cl30 + " leak-site claims · 30 days</span>" : "") +
+    "</div>" +
+    '<div class="ac-actions"><button type="button" class="btn btn-ghost ac-follow" data-acid="' + esc(a.id) + '" aria-pressed="' + followed + '">' + (followed ? "★ Following" : "☆ Follow") + "</button>" +
+    '<button type="button" class="btn btn-secondary ac-open" data-acid="' + esc(a.id) + '">View profile →</button></div>' +
+  "</article>";
+}
+function renderAcTracked(){
+  const list = visibleActors(), total = mergedActors().filter(a => acQ || actorTargetsRegion(a, geo)).length;
+  $("#ac-count").textContent = list.length + " of " + total + " profiles" + (acQ ? " matching “" + acQ + "” (all regions)" : geo === "all" ? "" : " targeting " + geoLabel()) + " · newest reported activity first";
+  $("#actors-list").innerHTML = list.length ? list.map(acCardHtml).join("")
+    : '<div class="empty">No curated profile matches.' + (acQ ? ' Try the <button type="button" class="btn btn-ghost" data-actab="directory">alias directory</button>, which covers ' + (aptGroups ? aptGroups.length : "hundreds of") + " records." : "") + "</div>";
+}
+function attackUrl(id){ return "https://attack.mitre.org/techniques/" + id.replace(".", "/") + "/"; }
+function openActor(id){
+  const a = actorById(id);
+  if (!a) return;
+  const im = actorIndex().map.get(a.id), g = aptMatch(a);
+  if (activeTab === "actors") history.replaceState(null, "", "#actors/" + a.id);
+  rwDrawerKey = "actor:" + a.id;
+  const reports = newest([...im.news, ...im.social]).slice(0, 8);
+  const cves = [...new Set(im.news.flatMap(i => ((i.title || "") + " " + (i.desc || "")).toUpperCase().match(/CVE-\d{4}-\d{4,7}/g) || []))].slice(0, 10);
+  const claims30 = acRecent(im.claims, rangeDays);
+  const tg = newest(im.social.filter(i => i.channel));
+  const followed = acFollow.includes(a.id);
+  const relGroups = Object.keys(REL_LABEL).map(t => [t, (a.rels || []).filter(r => r[1] === t)]).filter(([, l]) => l.length);
+  const itemLi = i => '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(String(i.title || "").slice(0, 140)) + '</a><span class="rw-dnote">' + esc(i.channel ? "Telegram · " + i.channel : i.src) + (i.date ? " · " + esc(fmtDate(i.date)) : "") + "</span></li>";
+  const layers = [...new Set((a.ttps || []).map(t => t[0].startsWith("T1498") ? "L3/L4 network floods (T1498)" : t[0].startsWith("T1499") ? "L7 application floods (T1499)" : "").filter(Boolean))];
+  const targetCcs = (a.geo || []).filter(x => /^[A-Z]{2}$/.test(x));
+  openDrawer("Actor profile · " + (a.type || a.motive), a.name,
+    '<p class="ac-dhead">' + acTypeBadge(a) + ' <button type="button" class="btn btn-ghost ac-follow" data-acid="' + esc(a.id) + '" aria-pressed="' + followed + '">' + (followed ? "★ Following" : "☆ Follow") + '</button> <span class="rw-dim">Link: <a href="#actors/' + esc(a.id) + '">#actors/' + esc(a.id) + "</a></span></p>" +
+    '<h4 class="rw-h">Overview</h4><p class="rw-desc ac-body">' + esc(a.overview) + "</p>" +
+    '<p class="rw-dnote">Curated summary. Statements aren\'t individually sourced yet; reference material is listed under Sources.</p>' +
+    '<dl class="rw-dl">' +
+      dRow("Assessed affiliation", esc(a.origin)) +
+      dRow("Attribution confidence", esc(a.conf)) +
+      dRow("Motivation", esc(a.motive)) +
+      dRow("Reported targets", esc(a.targets) + '<div class="rw-dnote">Scope: ' + esc(actorScopeLabel(a)) + "</div>") +
+      dRow("Latest reported activity", esc(fmtLast(a.last)) + '<div class="rw-dnote">Curated date of the most recent activity in public reporting, not a collection date.</div>') +
+      dRow("Profile list last edited", esc(fmtDay(ACTORS_EDITED))) +
+    "</dl>" +
+    '<h4 class="rw-h">Names and relationships</h4>' +
+    (relGroups.length ? relGroups.map(([t, l]) => '<div class="ac-rel"><span class="ac-rel-t">' + esc(REL_LABEL[t]) + "</span>" + l.map(r => "<b>" + esc(r[0]) + "</b>" + (r[2] ? ' <span class="rw-dim">(' + esc(r[2]) + ")</span>" : "")).join(", ") + "</div>").join("") : '<p class="rw-dim">No aliases or relationships recorded.</p>') +
+    (g ? '<div class="ac-rel"><span class="ac-rel-t">Vendor names · community sheet' + (g.name.toLowerCase() !== a.name.toLowerCase() ? " (filed under " + esc(g.name) + ")" : "") + "</span>" + esc(aptAliasText(g, 14) || "—") +
+      (g.overlaps ? '<div class="rw-dnote">Sheet\'s reported overlaps: ' + esc(g.overlaps) + "</div>" : "") +
+      '<div class="rw-dnote">The sheet lists names vendors use for related activity; some are partial overlaps, not the same group.</div></div>' : "") +
+    '<h4 class="rw-h">Techniques (MITRE ATT&amp;CK)</h4><ul class="rw-ev">' + (a.ttps || []).map(t =>
+      '<li><a class="mono" href="' + esc(attackUrl(t[0])) + '" target="_blank" rel="noopener">' + esc(t[0]) + "</a> " + esc(t[1]) + (t[2] ? '<div class="rw-dnote">Mapped from: ' + esc(t[2]) + "</div>" : "") + "</li>").join("") + "</ul>" +
+    '<p class="rw-dnote">Curated mapping from the behaviour described above, using ATT&amp;CK\'s official names. No per-technique report is attached yet.</p>' +
+    (a.type === "Hacktivist DDoS" ? '<h4 class="rw-h">DDoS profile</h4><dl class="rw-dl">' +
+      dRow("Claimed (self-reported)", tg.length ? tg.length + " Telegram post" + (tg.length > 1 ? "s name" : " names") + " this group" + (tg.filter(i => i.claim).length ? ", " + tg.filter(i => i.claim).length + " flagged as claims" : "") + '<ul class="rw-ev ac-mini">' + tg.slice(0, 4).map(itemLi).join("") + "</ul>" : '<span class="rw-dim">No posts naming this group in the collected Telegram channels.</span>') +
+      dRow("Observed (measured)", 'Measured attack traffic can\'t be attributed to a group. Cloudflare Radar telemetry for its reported targets: ' + (targetCcs.length ? targetCcs.map(cc => '<a href="#country/' + esc(cc) + '">' + esc(ccName(cc)) + "</a>").join(", ") : '<a href="#country">Geo Intel</a>')) +
+      dRow("Attack layers (mapped)", layers.length ? esc(layers.join(" · ")) : "—") +
+      dRow("Targeted services", esc(a.targets)) +
+    "</dl>" + '<p class="rw-dnote">Infrastructure overlaps are time-bound: shared IPs or similar traffic patterns alone don\'t establish attribution.</p>' : "") +
+    '<h4 class="rw-h">Recent activity in this app\'s data</h4>' +
+    (reports.length ? '<ul class="rw-ev">' + reports.map(itemLi).join("") + "</ul>" : '<p class="rw-dim">No collected report or post names this actor or its aliases.</p>') +
+    '<p class="rw-dnote">Whole-word matches on the name and aliases; dates are publication dates, not incident dates.</p>' +
+    (im.claims.length ? '<h4 class="rw-h">Leak-site claims</h4><p>' + claims30.length + " in the last " + rangeDays + " days, " + im.claims.length + ' retained in total. <button type="button" class="rw-grp" data-g="' + esc(im.claims[0].group) + '">Open group activity</button></p>' +
+      '<ul class="rw-ev">' + newest(im.claims.map(v => Object.assign({}, v, { date: v.date ? new Date(v.date) : null }))).slice(0, 5).map(v => '<li><button type="button" class="rw-org rw-inline" data-k="' + esc(claimKey(v)) + '">' + esc(v.victim) + '</button> <span class="rw-dim">· ' + esc(v.cc || "?") + " · " + esc(isoDay(v.date)) + "</span></li>").join("") + "</ul>" : "") +
+    (cves.length ? '<h4 class="rw-h">CVEs named in the same reports</h4><p>' + cves.map(c => vulnItems.some(v => v.cveId === c) ? '<button type="button" class="rw-org rw-inline vn-cve mono" data-cve="' + esc(c) + '">' + esc(c) + "</button>" : '<a class="mono" href="https://nvd.nist.gov/vuln/detail/' + esc(c) + '" target="_blank" rel="noopener">' + esc(c) + "</a>").join(", ") + '</p><p class="rw-dnote">Co-mentioned in a report that names this actor. That does not establish the actor exploits them.</p>' : "") +
+    (im.iocs.length ? '<h4 class="rw-h">Indicators tagged with this name</h4><p>' + im.iocs.length + ' indicator' + (im.iocs.length > 1 ? "s" : "") + ' from abuse.ch / MISP carry this actor\'s name in their threat or tags. <a href="#iocs">Open IOCs</a></p>' : "") +
+    '<h4 class="rw-h">Mitigation considerations</h4><p class="rw-desc ac-body">' + esc(a.mit) + '</p><p class="rw-dnote">General guidance for the techniques above, not evidence about this actor.</p>' +
+    '<h4 class="rw-h">Sources</h4><ul class="rw-ev">' +
+      (g && g.mitre ? '<li>MITRE ATT&amp;CK group ' + aptMitreLink(g.mitre) + "</li>" : "") +
+      (g && g.links && g.links.length ? "<li>Community sheet references: " + aptLinksHtml(g.links, 6) + "</li>" : "") +
+      (a.type === "Ransomware" ? '<li><a href="https://www.ransomware.live/group/' + esc(encodeURIComponent(groupKey(a.name))) + '" target="_blank" rel="noopener">ransomware.live group page</a></li>' : "") +
+      (!g && a.type !== "Ransomware" ? '<li class="rw-dim">No reference material linked yet.</li>' : "") +
+    "</ul>"
   );
+}
+function setFollow(id){
+  acFollow = acFollow.includes(id) ? acFollow.filter(x => x !== id) : [...acFollow, id];
+  try { localStorage.setItem("apjti.actorFollow", JSON.stringify(acFollow)); } catch (_){}
+  document.querySelectorAll('.ac-follow[data-acid="' + id + '"]').forEach(b => { const on = acFollow.includes(id); b.setAttribute("aria-pressed", String(on)); b.textContent = on ? "★ Following" : "☆ Follow"; });
+  renderAcKpis();
+}
+function renderAcTrends(){
+  const w = rwWindow(), scoped = rwScoped(w), top = countByKey(scoped, "group").slice(0, 10);
+  $("#ac-rw-sub").textContent = "Last " + rangeDays + " days · " + geoLabel();
+  $("#ac-rw-rank").innerHTML = top.length ? top.map(([g, n]) => '<button type="button" class="rw-bar rw-grp" data-g="' + esc(g) + '"><span class="rw-bar-n">' + esc(g) + '</span><span class="rw-bar-track"><i style="width:' + Math.max(4, Math.round(n / top[0][1] * 100)) + '%"></i></span><span class="rw-bar-v">' + n + "</span></button>").join("") : '<div class="empty">No claims in this period.</div>';
+  $("#ac-rw-note").textContent = "Source: ransomware.live leak-site posts kept by this app (deduplicated per organization and group; " + scoped.length + " claims in scope). Retained coverage is capped per region, so long windows undercount. See the Ransomware tab.";
+  const idx = actorIndex().map;
+  const men = mergedActors().map(a => [a, acRecent([...idx.get(a.id).news, ...idx.get(a.id).social], rangeDays).length]).filter(x => x[1]).sort((x, y) => y[1] - x[1]).slice(0, 10);
+  $("#ac-men-sub").textContent = "Last " + rangeDays + " days · all regions";
+  $("#ac-men-rank").innerHTML = men.length ? men.map(([a, n]) => '<button type="button" class="rw-bar ac-open" data-acid="' + esc(a.id) + '"><span class="rw-bar-n">' + esc(a.name) + '</span><span class="rw-bar-track"><i style="width:' + Math.max(4, Math.round(n / men[0][1] * 100)) + '%"></i></span><span class="rw-bar-v">' + n + "</span></button>").join("") : '<div class="empty">No tracked actor named in collected reports in this period.</div>';
+}
+function wireActors(){
+  const sec = $("#actors");
+  if (!sec) return;
+  let t = null;
+  $("#ac-q").addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { acQ = e.target.value.trim(); aptSearch = acQ.toLowerCase(); aptPage = 0; renderActors(); }, 150); });
+  const f = (sel, key, prop = "value") => $(sel).addEventListener("change", e => { acF[key] = e.target[prop]; renderActors(); });
+  f("#ac-f-type", "type"); f("#ac-f-sector", "sector"); f("#ac-f-ttp", "ttp"); f("#ac-f-recent", "recent", "checked"); f("#ac-f-follow", "follow", "checked");
+  const onClick = e => {
+    const b = e.target.closest("button, .ac-card");
+    if (!b) return;
+    if (b.matches("[data-actab]")){ acTab = b.dataset.actab; try { localStorage.setItem("apjti.acTab", acTab); } catch (_){} if (acTab === "directory") loadApt(); renderActors(); return; }
+    if (b.matches(".ac-follow")){ setFollow(b.dataset.acid); return; }
+    if (b.matches("[data-aptpage]")){ aptPage += parseInt(b.dataset.aptpage, 10); renderApt(); $("#apt-count").scrollIntoView({ block: "nearest" }); return; }
+    if (b.matches(".ac-open") || (b.matches(".ac-card") && !e.target.closest("a"))){ openActor(b.dataset.acid); return; }
+    if (b.matches(".rw-grp")){ openGroup(b.dataset.g); return; }
+  };
+  sec.addEventListener("click", onClick);
+  $("#rw-drawer").addEventListener("click", e => { const b = e.target.closest(".ac-follow, .ac-open"); if (b) onClick({ target: b }); });
 }
 
 /* ---------------- Actors: APT Groups & Operations community sheet (/api/actors) ---------------- */
@@ -1040,7 +1289,6 @@ function actorCardHtml(a, idx){
 let aptGroups = null, aptChanges = [], aptMeta = null, aptBaseline = null, aptIndex = new Map(), aptLoading = false;
 let aptTab = localStorage.getItem("apjti.aptTab") || "all";
 let aptSearch = "", aptOpen = null;
-const APT_ROW_CAP = 150;
 async function loadApt(){
   if (aptGroups || aptLoading) return;
   aptLoading = true;
@@ -1106,7 +1354,7 @@ function populateAptTabs(){
   if (!sel || !aptGroups) return;
   const tabs = [...new Set(aptGroups.map(g => g.tab))];
   if (aptTab !== "all" && !tabs.includes(aptTab)) aptTab = "all";
-  sel.innerHTML = '<option value="all">All countries</option>' + tabs.map(t => '<option value="' + esc(t) + '">' + esc(t) + "</option>").join("");
+  sel.innerHTML = '<option value="all">All sheet tabs</option>' + tabs.map(t => '<option value="' + esc(t) + '">' + esc(t) + "</option>").join("");
   sel.value = aptTab;
 }
 function visibleApt(){
@@ -1126,7 +1374,7 @@ function renderApt(){
   if (!aptGroups){ return; }
   const st = (aptMeta && aptMeta.status) || {};
   if (metaEl) metaEl.textContent = aptGroups.length
-    ? aptGroups.length + " groups" + (geo !== "all" ? " · " + aptGroups.filter(g => g.rg.includes(geo)).length + " target " + geoLabel() : "") + " · checked " + fmtDay(aptMeta && aptMeta.checkedAt) + (st.ok === false ? " · last check failed: " + st.error : "")
+    ? aptGroups.length + " directory records" + (geo !== "all" ? " · " + aptGroups.filter(g => g.rg.includes(geo)).length + " target " + geoLabel() : "") + " · checked " + fmtDay(aptMeta && aptMeta.checkedAt) + (st.ok === false ? " · last check failed: " + st.error : "")
     : (st.error ? "Unavailable — " + st.error : "Not collected yet — runs daily at 03:17 UTC, or POST /api/refresh-actors.");
   if (chEl){
     chEl.innerHTML = aptChanges.length
@@ -1137,10 +1385,24 @@ function renderApt(){
       : (aptBaseline ? "No edits to the sheet since monitoring began on " + esc(fmtDay(aptBaseline)) + "." : "Waiting for the first collection.");
   }
   const list = visibleApt();
-  if (!list.length){ el.innerHTML = '<tr><td colspan="5" class="empty">' + (aptGroups.length ? "No groups match this view." : "No data yet.") + "</td></tr>"; return; }
-  const rows = list.slice(0, APT_ROW_CAP).map(g => {
+  const pages = Math.max(1, Math.ceil(list.length / APT_PAGE_SIZE));
+  aptPage = Math.min(aptPage, pages - 1);
+  const from = aptPage * APT_PAGE_SIZE, page = list.slice(from, from + APT_PAGE_SIZE);
+  const countEl = $("#apt-count"), pagerEl = $("#apt-pager");
+  if (countEl) countEl.innerHTML = list.length ? "Showing <b>" + (from + 1) + "–" + (from + page.length) + "</b> of <b>" + list.length + "</b> records" + (aptSearch ? " matching \u201c" + esc(aptSearch) + "\u201d" : "") : "";
+  if (pagerEl) pagerEl.innerHTML = pages > 1 ? '<button type="button" class="btn btn-secondary" data-aptpage="-1"' + (aptPage ? "" : " disabled") + ' aria-label="Previous page">‹</button><span class="rw-dim">Page ' + (aptPage + 1) + " of " + pages + '</span><button type="button" class="btn btn-secondary" data-aptpage="1"' + (aptPage < pages - 1 ? "" : " disabled") + ' aria-label="Next page">›</button>' : "";
+  if (!list.length){ el.innerHTML = '<tr><td colspan="5" class="empty">' + (aptGroups.length ? "No records match this view." : "No data yet.") + "</td></tr>"; return; }
+  // The same group name filed under several country tabs is one name, several records.
+  const tabsByName = new Map();
+  aptGroups.forEach(x => { const k = String(x.name).toLowerCase(); if (!/^\?+$/.test(k)) tabsByName.set(k, [...(tabsByName.get(k) || []), x.tab]); });
+  const curatedBy = new Map(mergedActors().map(a => [aptMatch(a), a]).filter(([x]) => x));
+  const rows = page.map(g => {
+    const other = (tabsByName.get(String(g.name).toLowerCase()) || []).filter(t => t !== g.tab);
+    const cur = curatedBy.get(g);
     const row = '<tr class="apt-row" data-id="' + esc(g.id) + '">' +
       '<td data-label="Group"><b>' + esc(g.label || g.name) + "</b>" + (g.label ? ' <span class="apt-alias">(' + esc(g.name) + ")</span>" : "") +
+        (other.length ? '<div class="rw-dnote">Also a record under: ' + esc([...new Set(other)].join(", ")) + "</div>" : "") +
+        (cur ? '<div><button type="button" class="btn btn-ghost ac-open" data-acid="' + esc(cur.id) + '">Curated profile: ' + esc(cur.name) + " →</button></div>" : "") +
         "</td>" +
       '<td data-label="Sheet tab" class="text-muted">' + esc(g.tab) + "</td>" +
       '<td data-label="Also known as">' + esc(aptAliasText(g, 8) || "—") + "</td>" +
@@ -1155,16 +1417,16 @@ function renderApt(){
       f("Targets", esc(g.targets)) +
       f("Modus operandi", esc(g.modus)) +
       f("Origin", esc(g.origin)) +
-      f("Overlaps", esc(g.overlaps)) +
+      f("Reported overlaps (sheet)", esc(g.overlaps)) +
       f("Comment", esc(g.comment)) +
       f("Sources", aptLinksHtml(g.links, 12)) +
       "</td></tr>";
   }).join("");
-  el.innerHTML = rows + (list.length > APT_ROW_CAP ? '<tr><td colspan="5" class="empty">Showing ' + APT_ROW_CAP + " of " + list.length + " — search or pick a country to narrow.</td></tr>" : "");
+  el.innerHTML = rows;
 }
 function wireApt(){
   const sel = $("#apt-tab-filter");
-  if (sel) sel.addEventListener("change", e => { aptTab = e.target.value; localStorage.setItem("apjti.aptTab", aptTab); renderApt(); });
+  if (sel) sel.addEventListener("change", e => { aptTab = e.target.value; localStorage.setItem("apjti.aptTab", aptTab); aptPage = 0; renderApt(); });
   const search = $("#apt-search");
   let t = null;
   if (search) search.addEventListener("input", e => {
@@ -3008,15 +3270,11 @@ function wireActions(){
     downloadMarkdown();
     setCopyStatus("✓ Downloaded.");
   }));
-  document.addEventListener("click", e => {
-    const card = e.target.closest(".actor-card");
-    if (card && !e.target.closest("a")) card.classList.toggle("open");
-  });
   document.querySelectorAll("[data-t]").forEach(c => c.addEventListener("click", () => {
     rangeDays = parseInt(c.dataset.t, 10);
     localStorage.setItem("apjti.range", String(rangeDays));
     document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.t === c.dataset.t)));
-    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); buildDashboard();
+    renderRw(); renderRansomwareNews(); renderTelegram(); renderSnapshot(); renderActors(); buildDashboard();
   }));
   document.querySelectorAll("[data-geo]").forEach(c => c.addEventListener("click", () => setGeo(c.dataset.geo)));
   document.querySelectorAll("[data-tgf]").forEach(c => c.addEventListener("click", () => {
@@ -3119,7 +3377,7 @@ function renderGeoBody(){
     '<li><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a>" +
     '<div class="card-meta">' + esc(withChannel && i.channel ? i.channel : i.src) + (i.date ? " · " + fmtDate(i.date) : "") +
       (i.claim ? ' · <span class="tag tag-accent">Actor claim</span>' : "") + (i.lens ? ' · <span class="tag tag-neutral">DDoS · AppSec</span>' : "") + "</div></li>").join("") + "</ul>" : "";
-  const actorRow = a => "<li><b>" + esc(a.name) + '</b> <span class="text-muted">· ' + esc(a.motive) + " · " + esc(a.origin) + "</span>" +
+  const actorRow = a => '<li><a href="#actors/' + esc(a.id) + '"><b>' + esc(a.name) + '</b></a> <span class="text-muted">· ' + esc(a.motive) + " · " + esc(a.origin) + "</span>" +
     '<div class="card-meta">' + esc(a.targets) + "</div></li>";
 
   if (!cpCC){
@@ -3346,6 +3604,7 @@ function setGeo(key){
 /* ---------------- Init ---------------- */
 async function renderAll(){
   renderRw();
+  renderActors();
   renderRansomwareNews();
   renderTelegram();
   renderVulnerabilities();
@@ -3368,6 +3627,7 @@ async function init(){
   wireApt();
   wireRw();
   wireVulns();
+  wireActors();
   wireIpCheck();
   wireNavToggle();
   wireThemeToggle();
@@ -3375,13 +3635,15 @@ async function init(){
   wireCountry();
   const h = parseHash(location.hash);
   if (h.cc) cpCC = h.cc;
+  if (h.actor) acTab = "tracked";
   const startTab = TAB_IDS.includes(h.id) ? h.id : (localStorage.getItem("apjti.tab") || "brief");
   // Rewrite the hash only when it doesn't already name this view (e.g. an old "#map" link).
-  showTab(startTab, { skipHash: location.hash === "#" + startTab + (h.cc ? "/" + h.cc : "") });
+  showTab(startTab, { skipHash: location.hash === "#" + startTab + (h.cc ? "/" + h.cc : "") || !!h.actor });
 
   try {
     await loadData();
     renderAll();
+    if (h.actor && activeTab === "actors") openActor(h.actor);
   } catch (e){
     showError("Could not load /api/data (" + e.message + "). Is the Worker deployed and has the scheduled collector run at least once? Try POST /api/refresh.");
   }
