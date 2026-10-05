@@ -18,3 +18,8 @@ CF_RADAR_TOKEN=
 
 # Enables AbuseIPDB abuse-confidence scores for IP indicators on the IOCs page (free: https://www.abuseipdb.com/account/api).
 ABUSEIPDB_API_KEY=
+
+# Lets the CVE jobs call NVD with a per-key rate limit. Without it, NVD often answers HTTP 429 from
+# Workers' shared IPs, and the per-CVE backfill (products/CVSS for KEV entries) stalls. Free:
+# https://nvd.nist.gov/developers/request-an-api-key
+NVD_API_KEY=

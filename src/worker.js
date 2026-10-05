@@ -818,8 +818,8 @@ async function fetchText(url){
   if (!r.ok) throw new Error("HTTP " + r.status);
   return await r.text();
 }
-async function fetchJson(url){
-  const r = await fetchWithTimeout(url, { headers: { "User-Agent": UA, "Accept": "application/json" }, cf: { cacheTtl: 0 } });
+async function fetchJson(url, extraHeaders){
+  const r = await fetchWithTimeout(url, { headers: Object.assign({ "User-Agent": UA, "Accept": "application/json" }, extraHeaders), cf: { cacheTtl: 0 } });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return await r.json();
 }
@@ -1172,7 +1172,11 @@ function dedupeVulnerabilities(list){
 // Shared by collect() (part of the full 30-min cycle) and collectVulnerabilitiesOnly() (the
 // faster CVE-only cron below) — the three structured CVE sources fetch independently of
 // everything else, so pulling them into one helper avoids running this fetch/parse logic twice.
-async function fetchVulnSources(){
+// NVD rate-limits per IP without a key (5 requests / 30 s), and Workers share outbound IPs with every
+// other tenant, so unauthenticated calls from here hit HTTP 429 even at a few requests a run. A free
+// key (env.NVD_API_KEY, https://nvd.nist.gov/developers/request-an-api-key) is counted per key instead.
+function nvdHeaders(env){ return env && env.NVD_API_KEY ? { apiKey: env.NVD_API_KEY } : undefined; }
+async function fetchVulnSources(env){
   const sourceStatus = {};
   let nvdItems = [], ghsaItems = [], kev = [];
   const tasks = [];
@@ -1191,7 +1195,7 @@ async function fetchVulnSources(){
     try {
       const start = new Date(Date.now() - 2 * 86400000).toISOString().replace(/\.\d+Z$/, ".000");
       const end = new Date().toISOString().replace(/\.\d+Z$/, ".000");
-      const parsed = parseNvdCves(await fetchJson(NVD_CVE_URL + "?resultsPerPage=200&pubStartDate=" + start + "&pubEndDate=" + end));
+      const parsed = parseNvdCves(await fetchJson(NVD_CVE_URL + "?resultsPerPage=200&pubStartDate=" + start + "&pubEndDate=" + end, nvdHeaders(env)));
       nvdItems = parsed;
       sourceStatus["NVD (High/Critical)"] = { ok: true, count: parsed.length };
     } catch (e){
@@ -1533,23 +1537,25 @@ async function fetchRssBatch(sources){
 // NVD_BACKFILL_PER_RUN of them one at a time from NVD's per-CVE API — KEV first, newest first — and
 // re-reads records NVD hadn't analysed yet once they're NVD_RECHECK_MS old. ~18/hour clears the
 // 400-record list in about a day, then stays near zero. Unauthenticated NVD allows 5 requests per
-// 30 s; this job makes 1 window query + 3 here.
+// 30 s per IP, which Workers' shared egress IPs often exceed already; set NVD_API_KEY (see nvdHeaders()).
 const NVD_BACKFILL_PER_RUN = 3;
 const NVD_RECHECK_MS = 3 * 86400000;
-async function nvdBackfill(vulns, sourceStatus, nowIso = new Date().toISOString()){
+async function nvdBackfill(vulns, sourceStatus, nowIso = new Date().toISOString(), env){
   const now = Date.parse(nowIso);
   const due = v => { const vx = v.vx || {}; return !vx.nvdAt || (/Received|Awaiting|Undergoing|Deferred/i.test(vx.status || "") && now - Date.parse(vx.nvdAt) > NVD_RECHECK_MS); };
   const pick = vulns.filter(due).sort((a, b) => (Number(b.kev) - Number(a.kev)) || String(b.date || "").localeCompare(String(a.date || ""))).slice(0, NVD_BACKFILL_PER_RUN);
   if (!pick.length) return vulns;
   const got = new Map();
-  let failed = 0, lastErr = "";
-  await Promise.all(pick.map(async v => {
+  let lastErr = "";
+  // One at a time, stopping at the first failure: a 429 means the rest would fail too, and the
+  // remaining CVEs simply wait for the next run.
+  for (const v of pick){
     try {
-      const rec = parseNvdCves(await fetchJson(NVD_CVE_URL + "?cveId=" + encodeURIComponent(v.cveId)), 0, nowIso)[0];
+      const rec = parseNvdCves(await fetchJson(NVD_CVE_URL + "?cveId=" + encodeURIComponent(v.cveId), nvdHeaders(env)), 0, nowIso)[0];
       got.set(v.cveId, rec || { vx: { nvdAt: nowIso, status: "Not in NVD" } });
-    } catch (e){ failed++; lastErr = String(e.message || e); }
-  }));
-  sourceStatus["NVD backfill"] = failed === pick.length ? { ok: false, error: lastErr } : { ok: true, count: got.size };
+    } catch (e){ lastErr = String(e.message || e); break; }
+  }
+  sourceStatus["NVD backfill"] = !got.size ? { ok: false, error: lastErr + (env && env.NVD_API_KEY ? "" : " (no NVD_API_KEY)") } : { ok: true, count: got.size };
   return vulns.map(v => {
     const r = got.get(v.cveId);
     if (!r) return v;
@@ -1567,7 +1573,7 @@ async function nvdBackfill(vulns, sourceStatus, nowIso = new Date().toISOString(
 // through untouched from the previous cycle.
 async function collectVulnerabilitiesOnly(env){
   const nowIso = new Date().toISOString();
-  const [{ nvdItems, ghsaItems, kev, sourceStatus }, rss] = await Promise.all([fetchVulnSources(), fetchRssBatch(rssBatchForNow())]);
+  const [{ nvdItems, ghsaItems, kev, sourceStatus }, rss] = await Promise.all([fetchVulnSources(env), fetchRssBatch(rssBatchForNow())]);
   Object.assign(sourceStatus, rss.sourceStatus);
 
   const prevRaw = await env.THREAT_DATA.get("latest");
@@ -1575,7 +1581,7 @@ async function collectVulnerabilitiesOnly(env){
 
   const { mergedItems, mergedKev, mergedVulnerabilities } = mergeVulnData(nvdItems, ghsaItems, kev, prev, rss.items, nowIso);
   const enrichedVulnerabilities = await enrichEpss(mergedVulnerabilities, sourceStatus);
-  const backfilled = await nvdBackfill(enrichedVulnerabilities, sourceStatus, nowIso);
+  const backfilled = await nvdBackfill(enrichedVulnerabilities, sourceStatus, nowIso, env);
 
   const data = Object.assign({}, prev, {
     items: mergedItems.map(withoutVx),
@@ -1615,7 +1621,7 @@ async function collect(env){
 
   let nvdItems = [], ghsaItems = [];
   tasks.push((async () => {
-    const fetched = await fetchVulnSources();
+    const fetched = await fetchVulnSources(env);
     nvdItems = fetched.nvdItems; ghsaItems = fetched.ghsaItems; kev = fetched.kev;
     items.push(...ghsaItems, ...nvdItems);
     Object.assign(sourceStatus, fetched.sourceStatus);

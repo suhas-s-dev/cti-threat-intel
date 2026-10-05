@@ -18,7 +18,7 @@ curl -X POST http://localhost:8787/api/refresh   # manually trigger a collection
 
 There is no lint or test suite configured in this repo.
 
-Local dev needs a KV namespace bound in `wrangler.toml` (`wrangler kv namespace create THREAT_DATA`, paste the id in) before `/api/data` will return anything besides "no data yet". Optional secrets go in `.dev.vars` (copy from `.dev.vars.example`): `REFRESH_KEY` (gates `POST /api/refresh` with an `x-refresh-key` header), `ABUSECH_AUTH_KEY` (enables the abuse.ch sources — free key at https://auth.abuse.ch/), `ABUSEIPDB_API_KEY` (enables the on-demand IP reputation box on the IOCs tab — free key, 1,000 checks/day), and `CF_RADAR_TOKEN` (enables real DDoS attack-traffic telemetry on the Geo Intel page — free Account > Radar > Read token from the Cloudflare dashboard). Everything else works without any of them.
+Local dev needs a KV namespace bound in `wrangler.toml` (`wrangler kv namespace create THREAT_DATA`, paste the id in) before `/api/data` will return anything besides "no data yet". Optional secrets go in `.dev.vars` (copy from `.dev.vars.example`): `REFRESH_KEY` (gates `POST /api/refresh` with an `x-refresh-key` header), `ABUSECH_AUTH_KEY` (enables the abuse.ch sources — free key at https://auth.abuse.ch/), `ABUSEIPDB_API_KEY` (enables the on-demand IP reputation box on the IOCs tab — free key, 1,000 checks/day), `NVD_API_KEY` (free; NVD rate-limits Workers' shared IPs, so without it `nvdBackfill()` mostly gets HTTP 429), and `CF_RADAR_TOKEN` (enables real DDoS attack-traffic telemetry on the Geo Intel page — free Account > Radar > Read token from the Cloudflare dashboard). Everything else works without any of them.
 
 ## Architecture
 
