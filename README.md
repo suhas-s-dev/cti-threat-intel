@@ -2,6 +2,10 @@
 
 Open-source global threat intel dashboard, filterable by region (APJ, Europe, N. America, S. America, Middle East, Africa), with a profile page for any country: live feed, ransomware-leak tracker, MITRE-mapped actor profiles, INFOCON-driven severity banner, and a DarkGrid-style world claim map.
 
+![Brief page: DDoS attack flows on a night-Earth globe, with the top source → target flows and attack stats](docs/screenshot-brief.jpg)
+
+*The Brief page's DDoS attack flows card (measured traffic, last 7 days). Live: [cti-watch.threat-intel.workers.dev](https://cti-watch.threat-intel.workers.dev/)*
+
 Architecture:
 
 - **`src/worker.js`** — Cloudflare Worker. A cron trigger runs every 30 minutes, fetches 9 RSS sources + ransomware.live, tags/dedupes/merges everything, and writes one JSON blob to Workers KV. `GET /api/data` serves that blob (cached, no live fetching on the request path — fast and can't fail from CORS/timeouts). `POST /api/refresh` (optional key-gated) triggers an on-demand collection.
