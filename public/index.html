@@ -87,7 +87,7 @@
     </div>
     </div>
   </div>
-  <div class="kpis" id="kpis" data-only-tabs="brief ransomware vulnerabilities telegram actors iocs" aria-label="Key metrics"></div>
+  <div class="kpis" id="kpis" data-only-tabs="brief vulnerabilities telegram actors iocs" aria-label="Key metrics"></div>
   <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center; margin-top:var(--space-5)">
     <button type="button" class="btn btn-primary" data-action="download-brief">Download brief as Markdown</button>
     <span class="copy-status"></span>
@@ -221,34 +221,84 @@
   </div>
 </section>
 <!-- 03 RANSOMWARE -->
-<section id="ransomware" class="section" hidden>
+<section id="ransomware" class="section rw-page" hidden>
   <div class="section-head">
     <div class="section-head-left">
       <span class="apj-num">03 / Ransomware</span>
-      <h2 style="margin:0">Ransomware victims</h2>
+      <h2 style="margin:0">Ransomware &amp; extortion claims</h2>
+      <p class="rw-qualifier">Posts on criminal leak sites, collected by ransomware.live. A listing is the group&rsquo;s own claim &mdash; not a confirmed breach, and not proof data was taken.</p>
+      <p class="rw-fresh" id="rw-fresh"></p>
     </div>
     <div class="section-controls">
-      <select id="sector-filter" class="input" style="max-width:190px"><option value="all">All industries</option></select>
+      <button type="button" class="btn btn-secondary" id="rw-watch-btn" aria-haspopup="dialog">Watchlist</button>
+    </div>
+  </div>
+
+  <div class="kpis rw-kpis" id="rw-kpis" aria-label="Ransomware metrics for the selected period"></div>
+
+  <div class="rw-panels">
+    <div class="card rw-panel">
+      <div class="rw-panel-head"><span class="card-kicker">Daily claims</span><span class="rw-panel-sub" id="rw-trend-sub"></span></div>
+      <div class="rw-trend-wrap"><canvas id="rw-trend" role="img" aria-label="Claims observed per day; select a day to filter the table"></canvas></div>
+      <p class="rw-panel-note" id="rw-trend-note"></p>
+    </div>
+    <div class="card rw-panel">
+      <div class="rw-panel-head"><span class="card-kicker">Most active groups</span><span class="rw-panel-sub">select to filter</span></div>
+      <div class="rw-bars" id="rw-groups"></div>
+    </div>
+  </div>
+
+  <div class="rw-filters" role="search" aria-label="Filter claims">
+    <input id="rw-q" class="input" type="search" placeholder="Organization or domain" aria-label="Search organization or domain" autocomplete="off">
+    <select id="rw-f-group" class="input" aria-label="Group"><option value="">All groups</option></select>
+    <select id="rw-f-cc" class="input" aria-label="Country"><option value="">All countries</option></select>
+    <select id="sector-filter" class="input" aria-label="Sector"><option value="">All sectors</option></select>
+    <select id="rw-f-ev" class="input" aria-label="Evidence">
+      <option value="">Any evidence</option>
+      <option value="claim">Actor claim only</option>
+      <option value="reported">Independently reported</option>
+      <option value="social">Social mention</option>
+    </select>
+    <label class="rw-check"><input type="checkbox" id="rw-f-watch"> Watchlist only</label>
+  </div>
+  <div class="rw-chips" id="rw-chips"></div>
+
+  <div class="rw-tablebar">
+    <span id="rw-count" aria-live="polite"></span>
+    <div class="rw-tablebar-r">
+      <div class="rw-pager" id="rw-pager"></div>
+      <button type="button" class="btn btn-secondary" id="rw-export">Export CSV</button>
     </div>
   </div>
   <div class="card table-wrap" style="padding:0">
-    
-    <table class="table">
-      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Country</th><th>Claimed</th><th>Status</th></tr></thead>
+    <table class="table rw-table">
+      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Country</th><th>Posted</th><th>Evidence</th></tr></thead>
       <tbody id="rw"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
     </table>
   </div>
-  <p class="apj-eyebrow" id="rw-cov" style="margin-top:var(--space-3)"></p>
-  <p class="text-muted" style="font-size:12px;margin-top:var(--space-2)">Source: ransomware.live leak-site claims — treat as claimed, not confirmed.</p>
+  <p class="rw-cov" id="rw-cov"></p>
 
   <div class="section-head" style="margin-top:var(--space-8)">
     <div class="section-head-left">
-      <h3 style="margin:0">Community &amp; social signal</h3>
-      <span class="apj-eyebrow">Mastodon — unmoderated, not vetted intelligence</span>
+      <h3 style="margin:0">Reporting</h3>
+    </div>
+    <div class="apj-seg" role="tablist" aria-label="Reporting type">
+      <button type="button" role="tab" data-rwtab="reports" aria-selected="true" aria-pressed="true">Corroborating reports</button>
+      <button type="button" role="tab" data-rwtab="community" aria-selected="false" aria-pressed="false">Community signals</button>
     </div>
   </div>
-  <div class="feed-grid" id="rw-news-list"><div class="empty">Loading…</div></div>
+  <p class="rw-panel-note" id="rw-news-note"></p>
+  <div class="rw-signal-list" id="rw-news-list"><div class="empty">Loading…</div></div>
 </section>
+
+<div class="rw-drawer-back" id="rw-drawer-back" hidden></div>
+<aside class="rw-drawer" id="rw-drawer" role="dialog" aria-modal="true" aria-labelledby="rw-drawer-title" hidden>
+  <div class="rw-drawer-head">
+    <div><span class="card-kicker" id="rw-drawer-kicker"></span><h3 id="rw-drawer-title" style="margin:2px 0 0"></h3></div>
+    <button type="button" class="btn btn-ghost rw-drawer-x" id="rw-drawer-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="rw-drawer-body" id="rw-drawer-body"></div>
+</aside>
 
 <!-- 04 VULNERABILITIES -->
 <section id="vulnerabilities" class="section" hidden>

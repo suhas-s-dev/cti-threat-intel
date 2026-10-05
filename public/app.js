@@ -227,7 +227,6 @@ let vulnItems = [];
 let iocItems = [];
 let DATA = { generated: null, vulnGenerated: null, infocon: "green", items: [], victims: [], telegram: [], ransomwareNews: [], iocs: [], vulnerabilities: [], ddosTelemetry: null, sourceStatus: {} };
 let tgFilter = localStorage.getItem("apjti.tgFilter") || "all";
-let sectorFilter = localStorage.getItem("apjti.sectorFilter") || "all";
 let rangeDays = parseInt(localStorage.getItem("apjti.range") || "30", 10);
 let vulnFilter = localStorage.getItem("apjti.vulnFilter") || "all";
 let vulnSearch = "";
@@ -274,6 +273,8 @@ function showTab(id, opts){
   });
   if (!(opts && opts.skipHash)) history.replaceState(null, "", "#" + id + (id === "country" && cpCC ? "/" + cpCC : ""));
   if (id === "vulnerabilities" && chartVulnMatrixInst) chartVulnMatrixInst.resize();
+  if (id === "ransomware" && rwTrendInst) rwTrendInst.resize();
+  if (id !== "ransomware") closeDrawer();
   document.body.classList.toggle("map-mode", id === "country"); // before syncView(): sizes depend on layout
   if (id === "country"){
     // Chart.js sized these canvases while their container was display:none (0×0) on first load —
@@ -417,66 +418,533 @@ function relTime(iso){
 }
 function fmtDate(d){ if (!d) return ""; return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
 
-/* ---------------- Rendering: ransomware panel ---------------- */
-function populateSectorFilter(){
-  const sel = $("#sector-filter");
-  if (!sel) return;
-  const sectors = [...new Set(rwVictims.map(v => v.sector).filter(Boolean))].sort();
-  if (!sectors.includes(sectorFilter) && sectorFilter !== "all") sectorFilter = "all";
-  sel.innerHTML = '<option value="all">All industries</option>' +
-    sectors.map(s => '<option value="' + esc(s) + '"' + (s === sectorFilter ? " selected" : "") + ">" + esc(s) + "</option>").join("");
-  sel.value = sectorFilter;
+/* ---------------- Ransomware page: claims table, evidence, watchlist, drawers ----------------
+   All client-side over /api/data's `victims` (leak-site claims from ransomware.live). A claim is the
+   group's own post: evidence labels only ever add to that — "reported" when a vetted feed item or a
+   press link names the organization, "social" when a non-mirror community post does. Leak-tracker
+   bots that just repost the leak listing (Ransomlook, ransomwatch, ransomware.ninja, RedPacket
+   Security, Hackmanac alerts) are the same claim repeated, so they never count as corroboration. */
+const RW_PAGE_SIZE = 30;
+let rwF = { q: "", group: "", cc: "", sector: "", ev: "", watch: false, day: "" };
+try { const s = localStorage.getItem("apjti.sectorFilter"); if (s && s !== "all") rwF.sector = s; } catch (_){}
+let rwPage = 0, rwRows = [], rwSigTab = "reports", rwTrendInst = null, rwDrawerReturn = null, rwDrawerKey = null;
+
+function claimKey(v){ return (v.victim + "|" + v.group).toLowerCase(); }
+function isoDay(d){ const t = d instanceof Date ? d : new Date(d); return isNaN(t) ? "" : t.toISOString().slice(0, 10); }
+function rwWindow(){
+  const a = maxDate(rwVictims.map(v => v.date));
+  return a ? { end: a.getTime(), start: a.getTime() - rangeDays * 86400000 } : null;
 }
+function rwInWin(v, w){ return !w || !v.date || new Date(v.date).getTime() >= w.start; }
+function rwScoped(w){ return rwVictims.filter(v => victimInGeo(v) && rwInWin(v, w)); }
+
+// --- name/domain matching between claims and feed/social text (normalized, whole-word) ---
+const RW_SUFFIX = /\b(inc|incorporated|llc|llp|ltd|limited|corp|corporation|co|company|gmbh|ag|sa|srl|spa|bv|nv|plc|pty|pvt|sas|sarl|ab|oy|kk|group|holdings?)\b/g;
+const RW_GENERIC = new Set(["unknown", "hospital", "school", "university", "bank", "government", "city", "county", "company", "services", "solutions", "construction", "international"]);
+function normText(s){ return " " + String(s || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim() + " "; }
+function orgNorm(name){ return normText(name).replace(RW_SUFFIX, " ").replace(/\s+/g, " ").trim(); }
+function claimPhrases(v){
+  const out = [];
+  const n = orgNorm(String(v.victim).replace(/^www\./i, ""));
+  // Short single words ("Apex", "Nova") match far too much unrelated text to count as evidence.
+  if (n && !/\*/.test(v.victim) && !RW_GENERIC.has(n) && (n.includes(" ") ? n.length >= 7 : n.length >= 9)) out.push(n);
+  if (v.domain){ const d = normText(v.domain).trim(); if (d.includes(" ") && !out.includes(d)) out.push(d); }
+  return out;
+}
+const RW_MIRROR = /\bnew (?:post|victim)s?\b|ransom group blog posts?|\bpost title:|\bgroup name:|ransomware victim:|redpacketsecurity|cyber alert|ransomlook|ransomware\.live|ransomwatch|ransomware\.ninja|victims? claimed|\bleak ?site\b/i;
+function isMirrorPost(i){ return i.src === "Mastodon ransomwatch" || RW_MIRROR.test((i.title || "") + " " + (i.desc || "")); }
+let rwIdx = null; // { src, ev: Map claimKey → {reports, social, mirrors}, itemClaims: Map item → [claim] }
+function rwIndex(){
+  if (rwIdx && rwIdx.src === rwVictims && rwIdx.items === allItems && rwIdx.social === rwNewsItems) return rwIdx;
+  const byFirst = new Map();
+  for (const v of rwVictims) for (const p of claimPhrases(v)){
+    const f = p.split(" ")[0];
+    if (!byFirst.has(f)) byFirst.set(f, []);
+    byFirst.get(f).push({ p, v });
+  }
+  const ev = new Map(), itemClaims = new Map();
+  const bucket = k => { if (!ev.has(k)) ev.set(k, { reports: [], social: [], mirrors: [] }); return ev.get(k); };
+  const scan = (list, kind) => list.forEach(i => {
+    const t = normText((i.title || "") + " " + (i.desc || ""));
+    const hits = new Map();
+    for (const tok of new Set(t.trim().split(" "))) for (const c of byFirst.get(tok) || []){
+      if (!hits.has(claimKey(c.v)) && t.includes(" " + c.p + " ")) hits.set(claimKey(c.v), c);
+    }
+    if (!hits.size) return;
+    itemClaims.set(i, [...hits.values()].map(c => c.v));
+    const k = kind === "reports" ? "reports" : (isMirrorPost(i) ? "mirrors" : "social");
+    hits.forEach((c, key) => bucket(key)[k].push({ item: i, on: c.p === (c.v.domain && normText(c.v.domain).trim()) ? "domain" : "name" }));
+  });
+  scan(allItems, "reports");
+  scan([...rwNewsItems, ...telegramItems], "social");
+  rwIdx = { src: rwVictims, items: allItems, social: rwNewsItems, ev, itemClaims };
+  return rwIdx;
+}
+function claimEvidence(v){
+  const e = rwIndex().ev.get(claimKey(v)) || { reports: [], social: [], mirrors: [] };
+  const reported = e.reports.length + (v.press || []).length;
+  return { e, reported, social: e.social.length, level: reported ? "reported" : e.social.length ? "social" : "claim" };
+}
+
+// --- watchlist (this browser only) ---
+function loadWatch(){
+  try { const w = JSON.parse(localStorage.getItem("apjti.rwWatch") || "{}"); return { domains: w.domains || [], names: w.names || [], sectors: w.sectors || [], countries: w.countries || [] }; }
+  catch (_){ return { domains: [], names: [], sectors: [], countries: [] }; }
+}
+let rwWatch = loadWatch();
+function watchEmpty(){ return !rwWatch.domains.length && !rwWatch.names.length && !rwWatch.sectors.length && !rwWatch.countries.length; }
+// Each match says how it matched, so an uncertain name hit isn't read as a confirmed one.
+function watchMatches(v){
+  const out = [];
+  const d = (v.domain || "").toLowerCase();
+  if (d) for (const w of rwWatch.domains){
+    if (d === w) out.push({ kind: "Domain", term: w, how: "exact domain" });
+    else if (d.endsWith("." + w)) out.push({ kind: "Domain", term: w, how: "subdomain of " + w });
+  }
+  const n = orgNorm(v.victim);
+  for (const w of rwWatch.names){
+    const wn = orgNorm(w);
+    if (!wn) continue;
+    if (n === wn) out.push({ kind: "Organization", term: w, how: "same name (normalized)" });
+    else if ((" " + n + " ").includes(" " + wn + " ")) out.push({ kind: "Organization", term: w, how: "uncertain — name contains “" + w + "”" });
+  }
+  if (v.sector && rwWatch.sectors.includes(v.sector)) out.push({ kind: "Sector", term: v.sector, how: "sector label from the source" });
+  if (v.cc && rwWatch.countries.includes(v.cc)) out.push({ kind: "Country", term: ccName(v.cc), how: "victim country from the source" });
+  return out;
+}
+
+// --- filtering ---
+function rwFiltered(scoped){
+  const q = rwF.q.trim().toLowerCase();
+  return scoped.filter(v =>
+    (!q || String(v.victim).toLowerCase().includes(q) || (v.domain || "").includes(q)) &&
+    (!rwF.group || v.group === rwF.group) &&
+    (!rwF.cc || v.cc === rwF.cc) &&
+    (!rwF.sector || v.sector === rwF.sector) &&
+    (!rwF.day || isoDay(v.date) === rwF.day) &&
+    (!rwF.ev || claimEvidence(v).level === rwF.ev) &&
+    (!rwF.watch || watchMatches(v).length));
+}
+function fillSelect(sel, values, current, allLabel, label){
+  if (!sel) return;
+  sel.innerHTML = '<option value="">' + esc(allLabel) + "</option>" +
+    values.map(([val, n]) => '<option value="' + esc(val) + '">' + esc(label ? label(val) : val) + " (" + n + ")</option>").join("");
+  sel.value = values.some(([val]) => val === current) ? current : "";
+}
+function rwChips(){
+  const el = $("#rw-chips");
+  const chip = (k, label) => '<button type="button" class="rw-chip" data-clear="' + k + '" aria-label="Remove filter ' + esc(label) + '">' + esc(label) + ' <span aria-hidden="true">×</span></button>';
+  const evLabel = { claim: "Actor claim only", reported: "Independently reported", social: "Social mention" };
+  const chips = [
+    rwF.q && chip("q", "Search: " + rwF.q),
+    rwF.group && chip("group", "Group: " + rwF.group),
+    rwF.cc && chip("cc", "Country: " + ccName(rwF.cc)),
+    rwF.sector && chip("sector", "Sector: " + rwF.sector),
+    rwF.day && chip("day", "Day: " + rwF.day),
+    rwF.ev && chip("ev", "Evidence: " + evLabel[rwF.ev]),
+    rwF.watch && chip("watch", "Watchlist only")
+  ].filter(Boolean);
+  el.innerHTML = chips.length ? chips.join("") + '<button type="button" class="btn btn-ghost" data-clear="all">Clear filters</button>' : "";
+}
+
+// --- render ---
 function renderRw(){
   const el = $("#rw");
-  populateSectorFilter();
-  const scoped = rwVictims.filter(v => victimInGeo(v));
-  const oldest = scoped.filter(v => v.date).reduce((m,v) => (!m || v.date < m) ? v.date : m, "");
-  $("#rw-cov").textContent = rwVictims.length
-    ? "Coverage: " + rwVictims.length + " cached claims" + (geo !== "all" ? ", " + scoped.length + " in " + geoLabel() : "") +
-      (oldest ? ", oldest from " + String(oldest).slice(0,10) : "") + ". Each region keeps its newest claims; the archive grows with every collection cycle."
+  if (!el) return;
+  const w = rwWindow();
+  const scoped = rwScoped(w);
+  const windowLabel = (geo === "all" ? "worldwide" : "in " + geoLabel()) + ", last " + rangeDays + " days";
+
+  fillSelect($("#rw-f-group"), countByKey(scoped, "group"), rwF.group, "All groups");
+  fillSelect($("#rw-f-cc"), countByKey(scoped, "cc"), rwF.cc, "All countries", cc => ccName(cc) + " · " + cc);
+  fillSelect($("#sector-filter"), countByKey(scoped, "sector"), rwF.sector, "All sectors");
+  $("#rw-f-group").value = rwF.group; $("#rw-f-cc").value = rwF.cc; $("#sector-filter").value = rwF.sector;
+  $("#rw-f-ev").value = rwF.ev; $("#rw-f-watch").checked = rwF.watch;
+  if ($("#rw-q").value !== rwF.q) $("#rw-q").value = rwF.q;
+  rwChips();
+
+  renderRwFresh();
+  renderRwKpis(scoped, w);
+  renderRwTrend(scoped, w);
+  renderRwGroups(scoped);
+
+  rwRows = rwFiltered(scoped);
+  const pages = Math.max(1, Math.ceil(rwRows.length / RW_PAGE_SIZE));
+  rwPage = Math.min(rwPage, pages - 1);
+  const from = rwPage * RW_PAGE_SIZE, page = rwRows.slice(from, from + RW_PAGE_SIZE);
+  $("#rw-count").innerHTML = rwRows.length
+    ? "Showing <b>" + (from + 1) + "–" + (from + page.length) + "</b> of <b>" + rwRows.length + "</b> matching claims" +
+      (rwRows.length !== scoped.length ? ' <span class="rw-dim">· ' + scoped.length + " " + esc(windowLabel) + "</span>" : ' <span class="rw-dim">· ' + esc(windowLabel) + "</span>")
     : "";
-  let list = scoped;
-  if (sectorFilter !== "all") list = list.filter(v => v.sector === sectorFilter);
-  const rwAnchor = maxDate(rwVictims.map(v => v.date));
-  if (rwAnchor) list = list.filter(v => inWindow(v.date, rwAnchor.getTime()));
-  if (!list.length){
-    el.innerHTML = '<tr><td colspan="6" class="empty">No ' + (geo === "all" ? "" : esc(geoLabel()) + " ") + 'claims in the last ' + rangeDays + ' days — widen the time window or pick another region.</td></tr>';
+  $("#rw-pager").innerHTML = pages > 1
+    ? '<button type="button" class="btn btn-secondary" data-page="-1"' + (rwPage ? "" : " disabled") + ' aria-label="Previous page">‹</button>' +
+      '<span class="rw-dim">Page ' + (rwPage + 1) + " of " + pages + "</span>" +
+      '<button type="button" class="btn btn-secondary" data-page="1"' + (rwPage < pages - 1 ? "" : " disabled") + ' aria-label="Next page">›</button>'
+    : "";
+  $("#rw-export").disabled = !rwRows.length;
+
+  const stored = rwVictims.filter(v => victimInGeo(v));
+  const oldest = stored.filter(v => v.date).reduce((m, v) => (!m || v.date < m) ? v.date : m, "");
+  $("#rw-cov").textContent = rwVictims.length
+    ? "Retained coverage: " + stored.length + " claims" + (geo !== "all" ? " in " + geoLabel() : "") + (oldest ? ", oldest " + String(oldest).slice(0, 10) : "") +
+      ". Each region keeps only its newest claims (North America and Europe 500, APJ 400, smaller regions less), and most countries are back-filled from full history only every few hours — counts here are what this app retained, not every claim posted."
+    : "";
+
+  if (!page.length){
+    el.innerHTML = '<tr><td colspan="6" class="empty">' + (scoped.length
+      ? "No claims match these filters. <button type=\"button\" class=\"btn btn-ghost\" data-clear=\"all\">Clear filters</button>"
+      : "No claims " + esc(windowLabel) + " — widen the time window or pick another region.") + "</td></tr>";
     return;
   }
-  el.innerHTML = list.slice(0, 30).map(v =>
-    "<tr>" +
-      '<td data-label="Organization">' + victimNameHtml(v.victim) + "</td>" +
-      '<td data-label="Sector" class="text-muted">' + esc(v.sector || "—") + "</td>" +
-      '<td data-label="Group">' + esc(v.group) + "</td>" +
-      '<td data-label="Country">' + (v.cc ? '<a class="cc-link" href="#country/' + esc(v.cc) + '"><span class="rg-dot" style="--rc:' + regionColor(ccRegion(v.cc)) + '"></span> ' + esc(ccName(v.cc)) + "</a>" : '<span class="text-muted">Unknown</span>') + "</td>" +
-      '<td data-label="Claimed" class="text-muted">' + (v.date ? esc(String(v.date).slice(0,10)) : "—") + "</td>" +
-      '<td data-label="Status"><span class="tag tag-outline">Claimed</span></td>' +
-    "</tr>"
+  el.innerHTML = page.map(v => {
+    const ev = claimEvidence(v), wm = watchMatches(v), k = esc(claimKey(v));
+    return '<tr data-k="' + k + '"' + (wm.length ? ' class="rw-watched"' : "") + ">" +
+      '<td data-label="Organization"><button type="button" class="rw-org" data-k="' + k + '">' + victimNameHtml(v.victim) + "</button>" +
+        (wm.length ? ' <span class="tag tag-accent" title="' + esc(wm.map(m => m.kind + ": " + m.how).join("; ")) + '">Watchlist</span>' : "") +
+        (v.domain && orgNorm(v.domain) !== orgNorm(v.victim) ? '<div class="rw-domain">' + esc(v.domain) + "</div>" : "") + "</td>" +
+      '<td data-label="Sector" class="rw-sec">' + esc(v.sector || "—") + "</td>" +
+      '<td data-label="Group"><button type="button" class="rw-grp" data-g="' + esc(v.group) + '">' + esc(v.group) + "</button></td>" +
+      '<td data-label="Country">' + (v.cc ? '<a class="cc-link" href="#country/' + esc(v.cc) + '"><span class="rw-iso">' + esc(v.cc) + "</span> " + esc(ccName(v.cc)) + "</a>" : '<span class="rw-sec">Unknown</span>') + "</td>" +
+      '<td data-label="Posted" class="rw-date">' + (v.date ? esc(isoDay(v.date)) : "—") + "</td>" +
+      '<td data-label="Evidence">' + evidenceTags(ev) + "</td>" +
+    "</tr>";
+  }).join("");
+}
+function evidenceTags(ev){
+  return '<span class="tag tag-neutral" title="The group\'s own leak-site post">Actor claim</span>' +
+    (ev.reported ? ' <span class="tag tag-outline" title="Named in vetted news/advisory feeds or press links">Reported · ' + ev.reported + "</span>" : "") +
+    (ev.social ? ' <span class="tag tag-neutral rw-tag-soft" title="Named in community posts that are not leak-tracker mirrors">Social · ' + ev.social + "</span>" : "");
+}
+function renderRwFresh(){
+  const el = $("#rw-fresh");
+  if (!el) return;
+  const st = Object.entries(DATA.sourceStatus || {}).filter(([n]) => n.startsWith("ransomware.live"));
+  const recent = st.find(([n]) => n === "ransomware.live · recent");
+  const backfill = st.filter(([n]) => n !== "ransomware.live · recent").map(([n, s]) => n.split("· ")[1] + (s.ok ? "" : " (failed)"));
+  el.innerHTML = [
+    DATA.generated ? "Collected " + esc(relTime(DATA.generated)) + " · every 30 min" : "Not collected yet",
+    recent ? (recent[1].ok ? "Latest worldwide feed: " + recent[1].count + " posts" : '<span class="rw-warn">Latest worldwide feed failed: ' + esc(String(recent[1].error || "").slice(0, 60)) + "</span>") : "",
+    backfill.length ? "Full-history back-fill this cycle: " + esc(backfill.join(", ")) : ""
+  ].filter(Boolean).join(" · ");
+}
+function renderRwKpis(scoped, w){
+  const el = $("#rw-kpis");
+  if (!el) return;
+  const orgs = new Map();
+  scoped.forEach(v => { const k = v.domain || orgNorm(v.victim); if (!orgs.has(k)) orgs.set(k, new Set()); orgs.get(k).add(v.group); });
+  const multi = [...orgs.values()].filter(s => s.size > 1).length;
+  const groups = countByKey(scoped, "group");
+  let delta = "";
+  if (w){
+    const span = rangeDays * 86400000, prev = w.start - span;
+    const since = rwCompleteSince(geo === "all" ? [...GEO_KEYS, "other"] : [geo]);
+    if (since !== null && since <= prev){
+      const n = rwVictims.filter(v => { const t = new Date(v.date).getTime(); return victimInGeo(v) && t >= prev && t < w.start; }).length;
+      const d = scoped.length - n;
+      delta = '<div class="d">' + (d > 0 ? "▲ " + d : d < 0 ? "▼ " + Math.abs(d) : "No change") + " vs previous " + rangeDays + " days</div>";
+    } else delta = '<div class="d" title="The retained claims don\'t reach back a full previous period for this scope, so a comparison would undercount it.">No comparison — earlier period not fully retained</div>';
+  }
+  const watched = watchEmpty() ? null : scoped.filter(v => watchMatches(v).length).length;
+  const tile = (label, value, sub, extra, attrs) => '<div class="kpi"' + (attrs || "") + '><div class="l">' + esc(label) + '</div><div class="v">' + value + '</div><div class="s">' + sub + "</div>" + (extra || "") + "</div>";
+  el.innerHTML =
+    tile("New claims", String(scoped.length), "Leak-site posts, last " + rangeDays + " days · " + esc(geoLabel()), delta) +
+    tile("Unique organizations", String(orgs.size), multi ? multi + " claimed by more than one group" : "By domain, else normalized name") +
+    tile("Active groups", String(groups.length), groups.length ? "Most posts: " + esc(groups[0][0]) + " (" + groups[0][1] + ")" : "—") +
+    (watched === null
+      ? tile("Watchlist matches", "—", '<button type="button" class="btn btn-ghost rw-watch-open">Set up a watchlist</button>')
+      : tile("Watchlist matches", String(watched), watched ? '<button type="button" class="btn btn-ghost rw-watch-show">Show matches</button>' : "None in this period", "", watched ? ' style="border-left:4px solid var(--color-accent)"' : ""));
+}
+function renderRwTrend(scoped, w){
+  const canvas = $("#rw-trend");
+  if (!canvas || typeof Chart === "undefined" || !w) return;
+  const days = [];
+  for (let t = w.end; t >= w.start; t -= 86400000) days.unshift(isoDay(new Date(t)));
+  const counts = Object.fromEntries(days.map(d => [d, 0]));
+  scoped.forEach(v => { const d = isoDay(v.date); if (d in counts) counts[d]++; });
+  const since = rwCompleteSince(geo === "all" ? [...GEO_KEYS, "other"] : [geo]);
+  const gapDay = since !== null && since > w.start ? isoDay(new Date(since)) : null;
+  const accent = cssToken("--color-accent"), dim = cssToken("--color-neutral-500"), sel = cssToken("--color-accent-800");
+  const colors = days.map(d => d === rwF.day ? sel : (gapDay && d < gapDay ? hexA(dim, .55) : hexA(accent, .75)));
+  $("#rw-trend-sub").textContent = "Observed claims within retained coverage · select a day to filter";
+  $("#rw-trend-note").textContent = gapDay
+    ? "Before " + gapDay + " the retained data for this scope is incomplete (grey bars undercount). Apparent changes can also reflect source availability, not attacker activity."
+    : "Counts are by the day ransomware.live discovered each post. Apparent changes can reflect source availability, not only attacker activity.";
+  const grid = cssToken("--color-divider"), tick = cssToken("--color-neutral-700");
+  const data = { labels: days, datasets: [{ data: days.map(d => counts[d]), backgroundColor: colors, borderRadius: 2, maxBarThickness: 18 }] };
+  if (rwTrendInst){ rwTrendInst.data = data; rwTrendInst.options.scales.x.ticks.color = tick; rwTrendInst.options.scales.y.ticks.color = tick; rwTrendInst.options.scales.y.grid.color = grid; rwTrendInst.update("none"); return; }
+  rwTrendInst = new Chart(canvas, {
+    type: "bar", data,
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y + " claims" } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 7, font: { family: "IBM Plex Mono", size: 11 }, callback(v){ return this.getLabelForValue(v).slice(5); } } },
+        y: { beginAtZero: true, grid: { color: grid }, ticks: { color: tick, precision: 0, font: { family: "IBM Plex Mono", size: 11 } } }
+      },
+      onHover: (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : "default"; },
+      onClick: (e, els) => {
+        if (!els.length) return;
+        const d = rwTrendInst.data.labels[els[0].index];
+        rwF.day = rwF.day === d ? "" : d; rwPage = 0; renderRw();
+      }
+    }
+  });
+}
+function renderRwGroups(scoped){
+  const el = $("#rw-groups");
+  if (!el) return;
+  const top = countByKey(scoped, "group").slice(0, 8);
+  if (!top.length){ el.innerHTML = '<div class="empty">No claims in this period.</div>'; return; }
+  const max = top[0][1];
+  el.innerHTML = top.map(([g, n]) =>
+    '<button type="button" class="rw-bar" data-fg="' + esc(g) + '" aria-pressed="' + (rwF.group === g) + '">' +
+      '<span class="rw-bar-n">' + esc(g) + '</span><span class="rw-bar-track"><i style="width:' + Math.max(4, Math.round(n / max * 100)) + '%"></i></span><span class="rw-bar-v">' + n + "</span></button>"
   ).join("");
 }
 
-/* ---------------- Rendering: ransomware community/social signal (Mastodon) ---------------- */
+// --- reporting: corroborating reports / community signals ---
+// Mastodon's RSS splits each link as "https:// " + shown part + " " + hidden rest, so drop the
+// trailing path chunk too (only when it looks like one: contains - or /).
+function cleanPost(s){ return String(s || "").replace(/https?:\/\/ ?\S+(?: [\w.\/?=&%~+-]*[-\/][\w.\/?=&%~+-]*)?/g, "").replace(/#\s+(\w)/g, "#$1").replace(/\s+/g, " ").trim(); }
+function postAuthor(link){
+  const m = /^https?:\/\/([^/]+)\/@([^/]+)/.exec(link || "");
+  return m ? "@" + m[2] + "@" + m[1] : (/t\.me\//.test(link || "") ? "Telegram" : "");
+}
 function renderRansomwareNews(){
   const el = $("#rw-news-list");
   if (!el) return;
-  const anchor = maxDate(rwNewsItems.map(i => i.date));
-  let items = (anchor ? rwNewsItems.filter(i => inWindow(i.date, anchor.getTime())) : rwNewsItems.slice()).filter(i => itemInGeo(i));
-  items.sort((a,b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
-  if (!items.length){
-    el.innerHTML = '<div class="empty">No community posts' + (geo === "all" ? "" : " mentioning " + esc(geoLabel())) + ' in the last ' + rangeDays + ' days.</div>';
+  document.querySelectorAll("[data-rwtab]").forEach(b => { const on = b.dataset.rwtab === rwSigTab; b.setAttribute("aria-pressed", String(on)); b.setAttribute("aria-selected", String(on)); });
+  const idx = rwIndex(), w = rwWindow();
+  const scopedKeys = new Set(rwScoped(w).map(claimKey));
+  const claimBtn = v => '<button type="button" class="rw-org rw-inline" data-k="' + esc(claimKey(v)) + '">' + esc(v.victim) + " · " + esc(v.group) + "</button>";
+  if (rwSigTab === "reports"){
+    $("#rw-news-note").textContent = "Vetted news and advisory feeds that name an organization with a claim in this period (whole-word match on its name or domain, so check the article). This is independent reporting, not the organization's own confirmation.";
+    const ia = maxDate(allItems.map(i => i.date));
+    const rows = allItems.filter(i => idx.itemClaims.has(i) && (!ia || inWindow(i.date, ia.getTime())))
+      .map(i => [i, idx.itemClaims.get(i).filter(v => scopedKeys.has(claimKey(v)))]).filter(([, cs]) => cs.length);
+    rows.sort((a, b) => (b[0].date ? b[0].date.getTime() : 0) - (a[0].date ? a[0].date.getTime() : 0));
+    el.innerHTML = rows.length ? rows.slice(0, 30).map(([i, cs]) =>
+      '<div class="rw-signal"><div class="rw-signal-main"><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a>" +
+      '<div class="rw-signal-meta">' + esc(i.src) + (i.date ? " · " + esc(fmtDate(i.date)) : "") + "</div>" +
+      '<div class="rw-signal-about">Mentions ' + cs.slice(0, 3).map(claimBtn).join(", ") + (cs.length > 3 ? " +" + (cs.length - 3) : "") + "</div></div></div>"
+    ).join("") : '<div class="empty">No vetted report names a claimed organization in this period. Most leak-site claims never get independent coverage.</div>';
     return;
   }
-  el.innerHTML = items.slice(0, 20).map(i =>
-    '<div class="card elev-sm feed-card">' +
-      '<div class="feed-card-tags">' +
-        '<span class="tag tag-neutral">' + esc(i.src) + "</span>" + ccLinks(i.cc) +
-      "</div>" +
-      '<div class="card-title"><a href="' + esc(i.link) + '" target="_blank" rel="noopener">' + esc(i.title) + "</a></div>" +
-      (i.desc && i.desc !== i.title ? '<p class="card-body">' + esc(i.desc) + "</p>" : "") +
-      '<div class="card-meta"><span>' + (i.date ? fmtDate(i.date) : "") + "</span></div>" +
-    "</div>"
-  ).join("");
+  $("#rw-news-note").textContent = "Mastodon #ransomware and Telegram posts — unmoderated. Repeats of the same post or the same claim are collapsed into one entry; leak-tracker mirrors only restate the leak listing.";
+  const sa = maxDate(rwNewsItems.map(i => i.date));
+  const groups = new Map();
+  rwNewsItems.filter(i => !sa || inWindow(i.date, sa.getTime())).forEach(i => {
+    const cs = idx.itemClaims.get(i) || [];
+    const inGeo = cs.length ? cs.some(v => victimInGeo(v)) : itemInGeo(i);
+    if (!inGeo) return;
+    const key = cs.length ? "c:" + cs.map(claimKey).sort().join(",") : "t:" + normText(cleanPost(i.desc || i.title)).trim().slice(0, 90);
+    if (!groups.has(key)) groups.set(key, { posts: [], claims: cs });
+    groups.get(key).posts.push(i);
+  });
+  const list = [...groups.values()].map(g => { g.posts.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0)); return g; })
+    .sort((a, b) => (b.posts[0].date ? b.posts[0].date.getTime() : 0) - (a.posts[0].date ? a.posts[0].date.getTime() : 0));
+  if (!list.length){ el.innerHTML = '<div class="empty">No community posts' + (geo === "all" ? "" : " about " + esc(geoLabel())) + " in the last " + rangeDays + " days.</div>"; return; }
+  el.innerHTML = list.slice(0, 25).map(g => {
+    const p = g.posts[0], text = cleanPost((p.desc || "").length > (p.title || "").length ? p.desc : p.title);
+    const mirror = g.posts.every(isMirrorPost);
+    return '<div class="rw-signal"><div class="rw-signal-main">' +
+      '<p class="rw-signal-text">' + esc(text.length > 280 ? text.slice(0, 279) + "…" : text) + "</p>" +
+      '<div class="rw-signal-meta">' + esc(postAuthor(p.link) || p.src) + (p.date ? " · " + esc(relTime(p.date)) : "") +
+        ' · <a href="' + esc(p.link) + '" target="_blank" rel="noopener">Open post</a>' +
+        (mirror ? ' · <span class="tag tag-neutral">Leak-tracker mirror</span>' : "") + "</div>" +
+      (g.claims.length ? '<div class="rw-signal-about">About ' + g.claims.slice(0, 3).map(claimBtn).join(", ") + "</div>" : "") +
+      (g.posts.length > 1 ? '<details class="rw-more"><summary>' + (g.posts.length - 1) + " similar post" + (g.posts.length > 2 ? "s" : "") + "</summary>" +
+        g.posts.slice(1, 8).map(x => '<a href="' + esc(x.link) + '" target="_blank" rel="noopener">' + esc(postAuthor(x.link) || x.src) + (x.date ? " · " + esc(fmtDate(x.date)) : "") + "</a>").join("") + "</details>" : "") +
+    "</div></div>";
+  }).join("");
+}
+
+// --- drawers ---
+function openDrawer(kicker, title, bodyHtml){
+  const d = $("#rw-drawer");
+  if (d.hidden) rwDrawerReturn = document.activeElement;
+  $("#rw-drawer-kicker").textContent = kicker;
+  $("#rw-drawer-title").textContent = title;
+  $("#rw-drawer-body").innerHTML = bodyHtml;
+  $("#rw-drawer-body").scrollTop = 0;
+  d.hidden = false; $("#rw-drawer-back").hidden = false;
+  document.body.classList.add("rw-drawer-open");
+  $("#rw-drawer-close").focus();
+}
+function closeDrawer(){
+  const d = $("#rw-drawer");
+  if (!d || d.hidden) return;
+  d.hidden = true; $("#rw-drawer-back").hidden = true;
+  document.body.classList.remove("rw-drawer-open");
+  rwDrawerKey = null;
+  // Focus goes back to the row/button that opened it; the table itself was never re-rendered or scrolled.
+  if (rwDrawerReturn && document.contains(rwDrawerReturn)) rwDrawerReturn.focus({ preventScroll: true });
+  rwDrawerReturn = null;
+}
+function fmtStamp(iso){ return iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : ""; }
+function dRow(label, value, note){ return "<dt>" + esc(label) + "</dt><dd>" + value + (note ? '<div class="rw-dnote">' + note + "</div>" : "") + "</dd>"; }
+function loadNotes(){ try { return JSON.parse(localStorage.getItem("apjti.rwNotes") || "{}"); } catch (_){ return {}; } }
+function openClaim(key){
+  const v = rwVictims.find(x => claimKey(x) === key);
+  if (!v) return;
+  rwDrawerKey = key;
+  const ev = claimEvidence(v), wm = watchMatches(v);
+  const orgK = v.domain || orgNorm(v.victim);
+  const others = rwVictims.filter(x => x !== v && ((v.domain && x.domain === v.domain) || orgNorm(x.victim) === orgNorm(v.victim)) && orgK);
+  const sectors = [...new Set([v, ...others].map(x => x.sector).filter(Boolean))];
+  const srcLink = v.link || "https://www.ransomware.live/group/" + encodeURIComponent(v.group);
+  const itemLi = (x, on) => '<li><a href="' + esc(x.link) + '" target="_blank" rel="noopener">' + esc(cleanPost(x.title).slice(0, 140)) + '</a><span class="rw-dnote">' + esc(x.src) + (x.date ? " · " + esc(fmtDate(x.date)) : "") + (on ? " · matched on " + on : "") + "</span></li>";
+  const note = loadNotes()[key] || "";
+  openDrawer("Leak-site claim", v.victim,
+    '<dl class="rw-dl">' +
+      dRow("Domain", v.domain ? '<span class="mono">' + esc(v.domain) + "</span>" : '<span class="rw-dim">Not provided by the source</span>') +
+      dRow("Claiming group", '<button type="button" class="rw-grp" data-g="' + esc(v.group) + '">' + esc(v.group) + "</button>") +
+      dRow("Country", v.cc ? '<a class="cc-link" href="#country/' + esc(v.cc) + '"><span class="rw-iso">' + esc(v.cc) + "</span> " + esc(ccName(v.cc)) + "</a>" : "Unknown") +
+      dRow("Sector", esc(v.sector || "—"), sectors.length > 1 ? "Sources label this organization differently: " + esc(sectors.join(" / ")) + "." : "Enrichment by ransomware.live; may be wrong.") +
+    "</dl>" +
+    '<h4 class="rw-h">Timeline</h4><dl class="rw-dl">' +
+      dRow("Posted by group", v.claimed ? '<span class="mono">' + esc(fmtStamp(v.claimed)) + "</span>" : '<span class="rw-dim">Not provided separately</span>') +
+      dRow("Discovered by ransomware.live", v.date ? '<span class="mono">' + esc(fmtStamp(v.date)) + "</span>" : "—") +
+      dRow("First observed here", v.seen ? '<span class="mono">' + esc(fmtStamp(v.seen)) + "</span>" : '<span class="rw-dim">Before this app tracked it</span>') +
+      dRow("Last listed by source", v.checked ? '<span class="mono">' + esc(fmtStamp(v.checked)) + "</span>" : '<span class="rw-dim">Unknown</span>',
+        "When a collection last saw this claim. A claim that stops appearing does not mean it was resolved or a ransom paid.") +
+    "</dl>" +
+    '<p class="rw-dnote">None of these is the incident date. The intrusion usually happened days or weeks before the post, and the post rarely says when.</p>' +
+    (v.desc ? '<h4 class="rw-h">Source description</h4><p class="rw-desc">' + esc(v.desc) + '</p><p class="rw-dnote">From ransomware.live; some descriptions are machine-generated.</p>' : "") +
+    '<h4 class="rw-h">Evidence</h4><ul class="rw-ev">' +
+      '<li><span class="tag tag-neutral">Actor claim</span> The group listed this organization on its leak site. <a href="' + esc(srcLink) + '" target="_blank" rel="noopener">' + (v.link ? "ransomware.live record" : "Group page on ransomware.live") + "</a></li>" +
+      (ev.reported ? '<li><span class="tag tag-outline">Reported</span> Named in ' + ev.reported + " independent source" + (ev.reported > 1 ? "s" : "") + ":<ul>" +
+        (v.press || []).map(u => '<li><a href="' + esc(u) + '" target="_blank" rel="noopener">' + esc(u.replace(/^https:\/\//, "").slice(0, 70)) + '</a><span class="rw-dnote">press link from ransomware.live</span></li>').join("") +
+        ev.e.reports.slice(0, 6).map(r => itemLi(r.item, r.on)).join("") + "</ul></li>" : "") +
+      (ev.social ? '<li><span class="tag tag-neutral rw-tag-soft">Social</span> Mentioned in ' + ev.social + " community post" + (ev.social > 1 ? "s" : "") + ":<ul>" + ev.e.social.slice(0, 5).map(r => itemLi(r.item, r.on)).join("") + "</ul></li>" : "") +
+      (ev.e.mirrors.length ? '<li><span class="rw-dim">' + ev.e.mirrors.length + " leak-tracker mirror post" + (ev.e.mirrors.length > 1 ? "s repeat" : " repeats") + " the same listing — counted as one claim, not as corroboration.</span></li>" : "") +
+      '<li><span class="rw-dim">Organization statements are not tracked by this app — check the organization\'s own channels.</span></li>' +
+    "</ul>" +
+    (others.length ? '<h4 class="rw-h">Other claims on this organization</h4><ul class="rw-ev">' + others.slice(0, 6).map(x => '<li><button type="button" class="rw-org rw-inline" data-k="' + esc(claimKey(x)) + '">' + esc(x.group) + "</button> · " + esc(isoDay(x.date)) + "</li>").join("") + "</ul>" : "") +
+    '<h4 class="rw-h">Watchlist</h4>' + (wm.length
+      ? '<ul class="rw-ev">' + wm.map(m => "<li><b>" + esc(m.kind) + ":</b> " + esc(m.term) + ' <span class="rw-dim">— ' + esc(m.how) + "</span></li>").join("") + "</ul>"
+      : '<p class="rw-dim">No watchlist match. <button type="button" class="btn btn-ghost rw-watch-open">Edit watchlist</button></p>') +
+    '<h4 class="rw-h">Analyst notes</h4><textarea class="input rw-notes" id="rw-note" rows="4" placeholder="Triage notes, owner, ticket…" data-k="' + esc(key) + '">' + esc(note) + '</textarea><p class="rw-dnote">Saved in this browser only.</p>'
+  );
+}
+function actorForGroup(g){
+  const k = groupKey(g);
+  return mergedActors().find(a => groupKey(a.name) === k || String(a.aka || "").split("·").some(t => groupKey(t) === k));
+}
+function openGroup(g){
+  rwDrawerKey = null;
+  const w = rwWindow(), all = rwVictims.filter(v => v.group === g), inWin = all.filter(v => rwInWin(v, w));
+  const scopedWin = inWin.filter(v => victimInGeo(v));
+  const bar = list => { const max = list.length ? list[0][1] : 1; return list.slice(0, 6).map(([k, n]) => '<div class="rw-mini"><span>' + esc(k) + '</span><span class="rw-bar-track"><i style="width:' + Math.round(n / max * 100) + '%"></i></span><b>' + n + "</b></div>").join(""); };
+  const a = actorForGroup(g);
+  openDrawer("Ransomware group", g,
+    '<dl class="rw-dl">' +
+      dRow("Claims, last " + rangeDays + " days", "<b>" + inWin.length + "</b> worldwide" + (geo !== "all" ? " · " + scopedWin.length + " in " + esc(geoLabel()) : "")) +
+      dRow("Retained claims", String(all.length) + (all.length ? ' <span class="rw-dim">· ' + esc(isoDay(all[all.length - 1].date)) + " to " + esc(isoDay(all[0].date)) + "</span>" : "")) +
+    "</dl>" +
+    (inWin.length ? '<h4 class="rw-h">Sectors targeted</h4>' + bar(countByKey(inWin, "sector")) + '<h4 class="rw-h">Countries</h4>' + bar(countByKey(inWin, "cc").map(([cc, n]) => [ccName(cc), n])) : "") +
+    '<h4 class="rw-h">Recent claims</h4><ul class="rw-ev">' + all.slice(0, 8).map(x => '<li><button type="button" class="rw-org rw-inline" data-k="' + esc(claimKey(x)) + '">' + esc(x.victim) + '</button> <span class="rw-dim">· ' + esc(x.cc || "?") + " · " + esc(isoDay(x.date)) + "</span></li>").join("") + "</ul>" +
+    '<p><button type="button" class="btn btn-secondary rw-filter-group" data-g="' + esc(g) + '">Filter table to ' + esc(g) + "</button></p>" +
+    '<h4 class="rw-h">Profile</h4>' + (a
+      ? '<p class="rw-desc">' + esc(a.overview) + '</p><dl class="rw-dl">' + dRow("Also known as", esc(a.aka || "—")) + dRow("Origin / motive", esc(a.origin + " · " + a.motive)) +
+        dRow("Techniques (ATT&CK)", a.ttps.map(t => '<span class="mono">' + esc(t[0]) + "</span> " + esc(t[1])).join("<br>")) + dRow("Mitigation", esc(a.mit)) + "</dl>" +
+        '<p class="rw-dnote">' + esc(a.conf) + " Curated by hand; last reviewed " + esc(fmtLast(a.last)) + ".</p>"
+      : '<p class="rw-dim">No curated profile for this group yet.</p>') +
+    '<p class="rw-links"><a href="https://www.ransomware.live/group/' + esc(encodeURIComponent(g)) + '" target="_blank" rel="noopener">ransomware.live group page</a>' +
+      ' · <a href="https://www.cisa.gov/stopransomware/resources" target="_blank" rel="noopener">CISA #StopRansomware advisories</a>' +
+      ' · <button type="button" class="btn btn-ghost rw-apt" data-g="' + esc(g) + '">Search the Actors directory</button></p>'
+  );
+}
+function openWatchlist(){
+  rwDrawerKey = null;
+  const sectors = [...new Set(rwVictims.map(v => v.sector).filter(Boolean))].sort();
+  openDrawer("Watchlist", "Watched organizations",
+    '<p class="rw-dnote">Claims matching any entry are flagged in the table and counted in the header. Each match says how it matched — a name match is only a hint. Saved in this browser only.</p>' +
+    '<label class="rw-lbl" for="rw-w-domains">Domains <span class="rw-dim">— one per line; also matches subdomains</span></label>' +
+    '<textarea class="input" id="rw-w-domains" rows="4" placeholder="example.com">' + esc(rwWatch.domains.join("\n")) + "</textarea>" +
+    '<label class="rw-lbl" for="rw-w-names">Organization names <span class="rw-dim">— one per line; customers, suppliers, aliases</span></label>' +
+    '<textarea class="input" id="rw-w-names" rows="4" placeholder="Acme Logistics">' + esc(rwWatch.names.join("\n")) + "</textarea>" +
+    '<label class="rw-lbl" for="rw-w-countries">Countries <span class="rw-dim">— ISO codes or names, comma-separated</span></label>' +
+    '<input class="input" id="rw-w-countries" value="' + esc(rwWatch.countries.join(", ")) + '" placeholder="IN, Singapore, AU">' +
+    '<fieldset class="rw-sectors"><legend class="rw-lbl">Sectors</legend>' + sectors.map(s => '<label class="rw-check"><input type="checkbox" value="' + esc(s) + '"' + (rwWatch.sectors.includes(s) ? " checked" : "") + "> " + esc(s) + "</label>").join("") + "</fieldset>" +
+    '<p class="rw-dnote" id="rw-w-msg" aria-live="polite"></p>' +
+    '<p><button type="button" class="btn btn-primary" id="rw-w-save">Save watchlist</button></p>'
+  );
+}
+function saveWatchlist(){
+  const lines = id => [...new Set($(id).value.split(/[\n,]/).map(s => s.trim()).filter(Boolean))];
+  const domains = lines("#rw-w-domains").map(d => d.toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, ""));
+  const ccIn = lines("#rw-w-countries"), countries = [], bad = [];
+  ccIn.forEach(c => { const cc = resolveCountry(c, true); cc ? countries.push(cc) : bad.push(c); });
+  rwWatch = { domains, names: lines("#rw-w-names"), countries: [...new Set(countries)], sectors: [...document.querySelectorAll(".rw-sectors input:checked")].map(x => x.value) };
+  try { localStorage.setItem("apjti.rwWatch", JSON.stringify(rwWatch)); } catch (_){}
+  $("#rw-w-msg").textContent = "Saved." + (bad.length ? " Not recognized as countries: " + bad.join(", ") + "." : "");
+  renderRw();
+}
+function rwCsv(){
+  // Victim names and descriptions are attacker-written: neutralize spreadsheet formulas.
+  const cell = x => { let s = String(x == null ? "" : x); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+  const head = ["organization", "domain", "group", "country_code", "country", "sector", "posted_by_group", "discovered_by_ransomware_live", "first_observed_here", "last_listed_by_source", "evidence", "independent_reports", "watchlist_match", "source_record", "exported_at"];
+  const now = new Date().toISOString();
+  const rows = rwRows.map(v => { const ev = claimEvidence(v); return [v.victim, v.domain, v.group, v.cc, v.cc ? ccName(v.cc) : "", v.sector, v.claimed, v.date, v.seen, v.checked,
+    ev.level === "reported" ? "actor claim + independent reporting" : ev.level === "social" ? "actor claim + social mention" : "actor claim only", ev.reported,
+    watchMatches(v).map(m => m.kind + ": " + m.how).join("; "), v.link || "https://www.ransomware.live/group/" + encodeURIComponent(v.group), now]; });
+  const csv = [head, ...rows].map(r => r.map(cell).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv" }));
+  a.download = "ransomware-claims-" + (geo === "all" ? "global" : geo) + "-" + rangeDays + "d-" + now.slice(0, 10) + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function wireRw(){
+  const sec = $("#ransomware");
+  if (!sec) return;
+  const set = (k, v) => { rwF[k] = v; rwPage = 0; if (k === "sector") try { localStorage.setItem("apjti.sectorFilter", v || "all"); } catch (_){} renderRw(); };
+  let t = null;
+  $("#rw-q").addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => set("q", e.target.value), 150); });
+  $("#rw-f-group").addEventListener("change", e => set("group", e.target.value));
+  $("#rw-f-cc").addEventListener("change", e => set("cc", e.target.value));
+  $("#sector-filter").addEventListener("change", e => set("sector", e.target.value));
+  $("#rw-f-ev").addEventListener("change", e => set("ev", e.target.value));
+  $("#rw-f-watch").addEventListener("change", e => set("watch", e.target.checked));
+  $("#rw-export").addEventListener("click", rwCsv);
+  $("#rw-watch-btn").addEventListener("click", openWatchlist);
+  $("#rw-drawer-close").addEventListener("click", closeDrawer);
+  $("#rw-drawer-back").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+  $("#rw-drawer").addEventListener("input", e => {
+    if (e.target.id !== "rw-note") return;
+    const n = loadNotes();
+    if (e.target.value.trim()) n[e.target.dataset.k] = e.target.value; else delete n[e.target.dataset.k];
+    try { localStorage.setItem("apjti.rwNotes", JSON.stringify(n)); } catch (_){}
+  });
+  const onClick = e => {
+    const b = e.target.closest("button, tr[data-k]");
+    if (!b) return;
+    if (b.matches("[data-clear]")){
+      const k = b.dataset.clear;
+      if (k === "all") rwF = { q: "", group: "", cc: "", sector: "", ev: "", watch: false, day: "" }; else rwF[k] = k === "watch" ? false : "";
+      if (k === "all" || k === "sector") try { localStorage.setItem("apjti.sectorFilter", "all"); } catch (_){}
+      rwPage = 0; renderRw(); return;
+    }
+    if (b.matches("[data-page]")){ rwPage += parseInt(b.dataset.page, 10); renderRw(); $("#rw-count").scrollIntoView({ block: "nearest" }); return; }
+    if (b.matches("[data-fg]")){ set("group", rwF.group === b.dataset.fg ? "" : b.dataset.fg); return; }
+    if (b.matches("[data-rwtab]")){ rwSigTab = b.dataset.rwtab; renderRansomwareNews(); return; }
+    if (b.matches(".rw-filter-group")){ closeDrawer(); set("group", b.dataset.g); $("#rw-chips").scrollIntoView({ block: "center" }); return; }
+    if (b.matches(".rw-watch-open")){ openWatchlist(); return; }
+    if (b.matches(".rw-watch-show")){ closeDrawer(); set("watch", true); return; }
+    if (b.id === "rw-w-save"){ saveWatchlist(); return; }
+    if (b.matches(".rw-apt")){
+      closeDrawer();
+      const s = $("#apt-search");
+      if (s){ s.value = b.dataset.g; aptSearch = b.dataset.g.toLowerCase(); }
+      showTab("actors"); renderApt(); window.scrollTo(0, 0); return;
+    }
+    if (b.matches(".rw-grp")){ openGroup(b.dataset.g); return; }
+    if (b.matches(".rw-org") || (b.matches("tr[data-k]") && !e.target.closest("a"))){ openClaim(b.dataset.k); return; }
+  };
+  sec.addEventListener("click", onClick);
+  $("#rw-drawer").addEventListener("click", onClick);
 }
 
 /* ---------------- Rendering: Telegram bot feed ---------------- */
@@ -2145,6 +2613,7 @@ function wireThemeToggle(){
     try { localStorage.setItem("apjti.theme", next); } catch (_){}
     syncThemeToggle();
     if (chartVulnMatrixInst) renderVulnMatrix(visibleVulns()); // reads theme tokens
+    if (rwTrendInst) renderRw(); // trend bar colours are read from theme tokens too
   });
   syncThemeToggle();
 }
@@ -2202,12 +2671,6 @@ function wireActions(){
     iocTypeFilter = e.target.value;
     localStorage.setItem("apjti.iocTypeFilter", iocTypeFilter);
     renderIocs();
-  });
-  const sectorSel = $("#sector-filter");
-  if (sectorSel) sectorSel.addEventListener("change", e => {
-    sectorFilter = e.target.value;
-    localStorage.setItem("apjti.sectorFilter", sectorFilter);
-    renderRw();
   });
 }
 
@@ -2538,6 +3001,7 @@ async function init(){
   renderActors();
   wireActions();
   wireApt();
+  wireRw();
   wireIpCheck();
   wireNavToggle();
   wireThemeToggle();

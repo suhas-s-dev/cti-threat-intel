@@ -564,19 +564,45 @@ function parseTelegramChannel(html, channelName, opts){
   return out.slice(0, 30);
 }
 
-function parseRwJson(data, forceCc){
+// Fields kept per claim. Deliberately not kept: claim_url/post_url (the leak site itself — this app
+// must never become a path to stolen data) and screenshot (leak-page captures can show data samples).
+// `date` is when ransomware.live discovered the post; `claimed` is the actor's own post date where
+// the source has one (attackdate/published). Neither is the incident date, which is rarely known.
+const RW_DESC_MAX = 240;
+function rwDomain(s){
+  const d = String(s || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d) ? d : "";
+}
+function parseRwJson(data, forceCc, now = new Date().toISOString()){
   let arr = data;
   if (!Array.isArray(arr)) arr = data.victims || data.data || [];
   return arr.map(v => {
     const cc = String(v.country || forceCc || "").toUpperCase();
-    return {
-      victim: v.victim || v.post_title || "unknown",
+    const name = v.victim || v.post_title || "unknown";
+    let desc = String(v.description || "").replace(/\s+/g, " ").trim();
+    // recentvictims often puts just the country name here; the country feed has "[AI generated] N/A".
+    if (/^(\[ai generated\]\s*)?n\/?a$/i.test(desc) || desc === (COUNTRY_NAME[cc] || "\u0000") || desc === name) desc = "";
+    if (desc.length > RW_DESC_MAX) desc = desc.slice(0, RW_DESC_MAX - 1).trimEnd() + "\u2026";
+    const out = {
+      victim: name,
       group: v.group || v.group_name || "unknown",
       cc,
-      country: COUNTRY_NAME[cc] || cc || "—",
+      country: COUNTRY_NAME[cc] || cc || "\u2014",
       sector: (v.activity && v.activity !== "Not Found") ? v.activity : "",
-      date: v.discovered || v.attackdate || null
+      date: v.discovered || v.attackdate || null,
+      seen: now,
+      checked: now
     };
+    const claimed = v.attackdate || v.published;
+    // recentvictims' attackdate is usually within seconds of discovery — only keep a real difference.
+    if (claimed && out.date && Math.abs(new Date(claimed) - new Date(out.date)) >= 3600000) out.claimed = claimed;
+    const domain = rwDomain(v.domain || v.website || (/\./.test(name) ? name : ""));
+    if (domain) out.domain = domain;
+    if (desc) out.desc = desc;
+    if (typeof v.url === "string" && v.url.startsWith("https://www.ransomware.live/")) out.link = v.url;
+    const press = (Array.isArray(v.press) ? v.press : []).map(p => typeof p === "string" ? p : p && (p.url || p.link)).filter(u => /^https:\/\//.test(u || "")).slice(0, 3);
+    if (press.length) out.press = press;
+    return out;
   });
 }
 
@@ -827,17 +853,29 @@ function capVictims(victims, caps = VICTIM_CAPS){
   const n = {};
   return victims.filter(v => { const b = ccRegion(v.cc); n[b] = (n[b] || 0) + 1; return n[b] <= caps[b]; });
 }
+// Input is [this cycle's parse, ...prev.victims], so the first copy of a claim is the freshest. Later
+// (older) copies only fill fields the fresh one lacks — e.g. a claim seen first in a country feed
+// (with a description) and later in recentvictims (without) keeps its description — and `seen`
+// (when this app first observed the claim) keeps the earliest value, so it survives every re-fetch;
+// `checked` is the latest time any source still listed it.
 function dedupeVictims(victims){
-  const seen = new Set(), out = [];
+  const byKey = new Map();
   for (const v0 of victims){
     const key = (v0.victim + "|" + v0.group).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const cur = byKey.get(key);
+    if (cur){
+      for (const k of Object.keys(v0)) if (k !== "seen" && k !== "checked" && (cur[k] == null || cur[k] === "")) cur[k] = v0[k];
+      // A stored copy without `seen` predates first-observed tracking: "" means "unknown, earlier".
+      cur.seen = !v0.seen || !cur.seen ? "" : (v0.seen < cur.seen ? v0.seen : cur.seen);
+      if (v0.checked && (!cur.checked || v0.checked > cur.checked)) cur.checked = v0.checked;
+      continue;
+    }
+    const v = Object.assign({}, v0);
     // Older stored claims carry an apj flag from the India-first schema; region now comes from cc.
-    const v = "apj" in v0 ? Object.assign({}, v0) : v0;
-    if (v !== v0){ delete v.apj; if (COUNTRY_NAME[v.cc]) v.country = COUNTRY_NAME[v.cc]; }
-    out.push(v);
+    if ("apj" in v){ delete v.apj; if (COUNTRY_NAME[v.cc]) v.country = COUNTRY_NAME[v.cc]; }
+    byKey.set(key, v);
   }
+  const out = [...byKey.values()];
   out.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
   return out;
 }
