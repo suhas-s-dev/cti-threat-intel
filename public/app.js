@@ -3874,8 +3874,6 @@ function syncGeoUi(){
   document.querySelectorAll("[data-geo]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.geo === geo)));
   const eyebrow = $("#scope-eyebrow");
   if (eyebrow) eyebrow.textContent = geo === "all" ? "Global · all regions" : "Region · " + geoLabel();
-  const bs = $("#brief-scope");
-  if (bs) bs.textContent = (geo === "all" ? "Global" : geoLabel() + " first, then everywhere else") + " · assessed from collected data, not confirmed";
 }
 function setGeo(key){
   geo = normGeo(key);
