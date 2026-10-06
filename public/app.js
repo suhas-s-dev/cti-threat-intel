@@ -2408,7 +2408,7 @@ function renderFlows(){
   $("#flows-stats").innerHTML =
     '<div><span>Most common L3/L4 vector</span><b>' + esc(top((t.l3 || {}).global, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
     '<div><span>Most targeted industry (L7)</span><b>' + esc(top(t.l7Industries, x => x.label + " · " + flowPct(x.pct))) + "</b></div>" +
-    '<div><span>L3/L4 attacks lasting over 3 hours</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
+    '<div><span title="Share of mitigated L3/L4 attack traffic that came from attacks lasting more than 3 hours, not the share of attacks">L3/L4 traffic from attacks over 3 h</span><b>' + (long ? flowPct(long.pct) : "—") + "</b></div>";
   $("#flows-note").innerHTML = "Shares of mitigated DDoS traffic, worldwide, over the last 7 days, not individual attacks and not live. " +
     "A source country is where attack traffic came from (often botnets or proxies), not who is behind it. Arcs show the top " + arcs.length + " HTTP flows between different countries; traffic within one country is ringed. " +
     // Attribution is a condition of the data's CC BY-NC 4.0 licence; keep this credit.
@@ -3236,7 +3236,7 @@ function renderDdosTelemetry(){
     const targetPanel = configured ? panel("Attacks targeting " + esc(where), "L3/L4 · Cloudflare Radar",
         (bars ? sub("Daily volume · 28 days, relative to its peak", bars) : "") +
         sub("Attack vectors", list((d.l3 || []).map(pctRow).join(""), "No L3/L4 attack traffic recorded.")) +
-        '<div class="ddos-two">' + sub("Size", list((d.bitrate || []).map(pctRow).join(""), "—")) + sub("Duration", list((d.duration || []).map(pctRow).join(""), "—")) + "</div>") : "";
+        '<div class="ddos-two">' + sub("Size · share of traffic", list((d.bitrate || []).map(pctRow).join(""), "—")) + sub("Duration · share of traffic", list((d.duration || []).map(pctRow).join(""), "—")) + "</div>") : "";
     const outagePanel = panel("Internet disruptions in " + esc(where), "IODA · Radar outage notes",
         sub("Connectivity drops · last 28 days", ioda.events.length ? '<ul class="cp-list ddos-posts">' + ioda.events.slice(0, 6).map(e =>
           "<li>" + esc(new Date(e.start).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })) + " UTC · " + esc(fmtSpan(e.start, e.end)) +
@@ -3271,7 +3271,7 @@ function renderDdosTelemetry(){
       : panel("Measured attack traffic", "Cloudflare Radar", dt ? '<div class="empty">Collected before this panel existed — fills in on the next 30-min cycle.</div>' : noToken);
   const whatPanel = dt ? panel("What the attacks look like", "worldwide · Cloudflare Radar",
       '<div class="ddos-two">' + sub("L3/L4 vectors", list(((dt.l3 && dt.l3.global) || []).slice(0, 6).map(pctRow).join(""), "—")) + sub("L7 HTTP methods", list(((dt.l7 && dt.l7.global) || []).slice(0, 6).map(pctRow).join(""), "—")) + "</div>" +
-      (dt.bitrate && dt.bitrate.length ? '<div class="ddos-two">' + sub("Size", dt.bitrate.map(pctRow).join("")) + sub("Duration", (dt.duration || []).map(pctRow).join("")) + "</div>" : "") +
+      (dt.bitrate && dt.bitrate.length ? '<div class="ddos-two">' + sub("Size · share of traffic", dt.bitrate.map(pctRow).join("")) + sub("Duration · share of traffic", (dt.duration || []).map(pctRow).join("")) + "</div>" : "") +
       (dt.l7Industries && dt.l7Industries.length ? sub("Most targeted industries · L7", dt.l7Industries.slice(0, 6).map(pctRow).join("")) : "")) : "";
   const outagePanel = panel("Internet disruptions", "IODA · Radar outage notes",
       sub("Countries with connectivity drops · 7 days", iodaRows.length ? iodaRows.slice(0, 8).map(e =>
