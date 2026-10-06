@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Threat Intelligence</title>
-<meta name="description" content="Open-source APJ/India-priority threat intelligence dashboard: live feed, ransomware tracker, actor profiles, and a DarkGrid-style ransomware attack map.">
+<meta name="description" content="Open-source global threat intelligence dashboard: region filters, per-country profiles, ransomware tracker, actor profiles, and a DarkGrid-style ransomware attack map.">
 <script>
   // Runs before first paint so there's no light→dark flash. Dark unless the user picked light with the
   // nav toggle (apjti.theme). prefers-color-scheme is deliberately not consulted: "light" is the OS
@@ -16,7 +16,10 @@
     document.documentElement.setAttribute("data-theme", t);
   })();
 </script>
-<meta name="theme-color" content="#0a0b0d">
+<meta name="theme-color" content="#0a0f14">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="styles.css">
 <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js" integrity="sha384-Ukv1p/xTma6P4/2bY5KzWBw+ydSpXmhCMtyciIQVDJ1RmOxtCYNMF1uXT9T63H67" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
@@ -24,21 +27,21 @@
 <body>
 
 <nav class="nav">
-  <span class="nav-brand">Threat Intel</span>
+  <span class="nav-brand"><span class="nav-logo" aria-hidden="true">CTI</span>Threat Intel</span>
   <div class="nav-links" id="nav-links">
     <a href="#brief">Brief</a>
+    <a href="#country">Geo Intel</a>
     <a href="#ransomware">Ransomware</a>
     <a href="#vulnerabilities">Vulnerabilities</a>
     <a href="#telegram">Telegram</a>
     <a href="#actors">Actors</a>
-    <a href="#map">Map</a>
     <a href="#iocs">IOCs</a>
   </div>
   <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch to light theme" title="Switch to light theme">
     <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>
     <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
   </button>
-  <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief</button>
+  <button type="button" class="btn btn-primary" data-action="download-brief">Download brief</button>
   <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation menu"><span></span><span></span><span></span></button>
 </nav>
 
@@ -52,20 +55,41 @@
   <div class="err-banner" id="err-banner"></div>
 </div>
 
-<header class="section" style="padding-top:var(--space-6)">
-  <div class="apj-eyebrow" data-only-tabs="brief" style="margin-bottom:var(--space-3)">Open-source collection · DDoS / AppSec lens · MITRE ATT&amp;CK mapped</div>
-  <div style="display:flex; align-items:center; gap:var(--space-4); flex-wrap:wrap; margin-bottom:var(--space-6)">
-    <div class="apj-seg" role="radiogroup" aria-label="Window">
-      <button type="button" data-t="7" aria-pressed="false">7 days</button>
-      <button type="button" data-t="30" aria-pressed="false">30 days</button>
-      <button type="button" data-t="90" aria-pressed="false">3 months</button>
-      <button type="button" data-t="180" aria-pressed="false">6 months</button>
-      <button type="button" data-t="365" aria-pressed="false">1 year</button>
+<header class="section" style="padding-top:var(--space-5); padding-bottom:var(--space-4)">
+  <div class="page-head">
+    <div data-only-tabs="brief ransomware telegram actors iocs">
+      <div class="apj-num" id="scope-eyebrow">Global</div>
+      <h1 data-only-tabs="brief">Signals worth triaging</h1>
+      <p data-only-tabs="brief">Open-source collection · DDoS / AppSec lens · MITRE ATT&amp;CK mapped. Leak-site and social claims are shown as claims, not confirmed incidents.</p>
     </div>
-    <span class="tag tag-outline infocon-tag" id="hero-infocon"><span class="dot"></span><span id="hero-infocon-text">INFOCON: —</span></span>
+    <div class="head-ctls">
+    <div class="window-ctl" data-only-tabs="brief ransomware telegram actors">
+      <span class="apj-eyebrow" id="geo-label">Region</span>
+      <div class="apj-seg geo-seg" role="radiogroup" aria-labelledby="geo-label">
+        <button type="button" data-geo="all" aria-pressed="false">All</button>
+        <button type="button" data-geo="apj" aria-pressed="false">APJ</button>
+        <button type="button" data-geo="eu" aria-pressed="false">Europe</button>
+        <button type="button" data-geo="na" aria-pressed="false">N. America</button>
+        <button type="button" data-geo="sa" aria-pressed="false">S. America</button>
+        <button type="button" data-geo="me" aria-pressed="false">Middle East</button>
+        <button type="button" data-geo="af" aria-pressed="false">Africa</button>
+      </div>
+    </div>
+    <div class="window-ctl" data-only-tabs="brief country ransomware telegram actors iocs">
+      <span class="apj-eyebrow" id="window-label">Window · ransomware, Telegram, snapshot, trend</span>
+      <div class="apj-seg" role="radiogroup" aria-labelledby="window-label">
+        <button type="button" data-t="7" aria-pressed="false">7 days</button>
+        <button type="button" data-t="30" aria-pressed="false">30 days</button>
+        <button type="button" data-t="90" aria-pressed="false">3 months</button>
+        <button type="button" data-t="180" aria-pressed="false">6 months</button>
+        <button type="button" data-t="365" aria-pressed="false">1 year</button>
+      </div>
+    </div>
+    </div>
   </div>
-  <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center">
-    <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief as Markdown</button>
+  <div class="kpis" id="kpis" data-only-tabs="brief telegram iocs" aria-label="Key metrics"></div>
+  <div data-only-tabs="brief" style="display:flex; gap:var(--space-3); flex-wrap:wrap; align-items:center; margin-top:var(--space-5)">
+    <button type="button" class="btn btn-primary" data-action="download-brief">Download brief as Markdown</button>
     <span class="copy-status"></span>
   </div>
 </header>
@@ -77,27 +101,44 @@
       <span class="apj-num">01 / Brief</span>
       <h2 style="margin:0">Daily brief</h2>
     </div>
-    <span class="apj-eyebrow">India first, then global · assessed from collected data, not confirmed</span>
+  </div>
+  <div class="card flows flows-dark" id="flows" aria-labelledby="flows-h">
+    <div class="flows-hero">
+      <div class="flows-copy">
+        <span class="flows-kicker">Measured DDoS traffic · last 7 days</span>
+        <h3 id="flows-h" class="flows-title">DDoS attack flows</h3>
+        <p class="flows-lede" id="flows-sub"></p>
+        <div class="apj-seg" role="radiogroup" aria-label="Map view">
+          <button type="button" data-flowmode="flows" aria-pressed="true">HTTP flows</button>
+          <button type="button" data-flowmode="targets" aria-pressed="false">Targets</button>
+          <button type="button" data-flowmode="origins" aria-pressed="false">Sources</button>
+        </div>
+        <div class="flows-side"><div class="card-kicker" id="flows-list-h"></div><ol class="flows-list" id="flows-list"></ol></div>
+      </div>
+      <div class="flows-stage" id="flows-stage">
+        <canvas class="flows-particles" id="flows-particles" aria-hidden="true"></canvas>
+        <div class="flows-globe" id="flows-globe"></div>
+        <div class="flows-map" id="flows-map" hidden></div>
+      </div>
+    </div>
+    <div class="flows-stats" id="flows-stats"></div>
+    <p class="rw-panel-note" id="flows-note"></p>
   </div>
   <div class="grid-2-1">
-    <div class="card blueprint elev-md" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="card elev-md" style="padding:var(--space-6)">
       <div class="card-kicker" id="brief-date">—</div>
       <div id="brief-text" class="placeholder">Loading…</div>
     </div>
     <div style="display:flex; flex-direction:column; gap:var(--space-4)">
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Signal snapshot</div>
-        <div id="snapshot"></div>
+        <div id="snapshot" class="bempty">Loading…</div>
       </div>
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Critical vulnerabilities <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· CISA KEV, added this week</span></div>
         <div id="kev-list" class="bempty">Loading…</div>
       </div>
-      <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card elev-sm" style="padding:var(--space-6)">
         <div class="card-kicker">Top TTPs observed <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· curated actor profiles</span></div>
         <div id="top-ttps"></div>
       </div>
@@ -105,81 +146,283 @@
   </div>
 </section>
 
-<!-- 02 RANSOMWARE -->
-<section id="ransomware" class="section" hidden>
+<!-- 02 GEO INTEL -->
+<!-- Geo Intel: one page for everything geographic (it absorbed the old Map tab). World or region
+     overview when no country is picked; a country profile when one is. Globe and flat dot-matrix
+     map are two views of the same selection. -->
+<section id="country" class="section section-wide" hidden>
+  <div class="darkgrid">
+    <header class="dg-top">
+      <div class="dg-top-left">
+        <span class="dg-num">02 / Geo Intel</span>
+        <h2 class="dg-h"><span class="pulse-dot"></span>Geo Intel <em id="geo-h-em">claims, news &amp; actors by place</em></h2>
+        <div class="dg-sub" id="dg-updated">loading…</div>
+      </div>
+      <div class="dg-top-right">
+        <div class="dg-clock" aria-label="Current UTC time"><span id="dg-clock">--:--:--</span><small>UTC</small></div>
+      </div>
+    </header>
+
+    <div class="dg-banner" id="dg-banner"><span class="lvl-dot"></span><span id="dg-banner-text">Loading INFOCON…</span></div>
+
+    <div class="dg-toolbar">
+      <div class="dg-regions" id="dg-regions" role="tablist" aria-label="Region">
+        <button type="button" class="dg-rtab active" data-region="all">World</button>
+        <button type="button" class="dg-rtab" data-region="apj">APJ</button>
+        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
+        <button type="button" class="dg-rtab" data-region="na">N. America</button>
+        <button type="button" class="dg-rtab" data-region="sa">S. America</button>
+        <button type="button" class="dg-rtab" data-region="me">Middle East</button>
+        <button type="button" class="dg-rtab" data-region="af">Africa</button>
+      </div>
+      <div class="dg-tools">
+        <form id="cp-form" class="cp-form" autocomplete="off">
+          <input id="cp-search" class="dg-locate" type="search" list="cp-countries" placeholder="Any country — India, Germany, Brazil…" aria-label="Pick a country">
+          <datalist id="cp-countries"></datalist>
+        </form>
+        <div class="dg-viewtog" role="radiogroup" aria-label="View">
+          <button type="button" data-view="globe" aria-pressed="true">Globe</button>
+          <button type="button" data-view="flat" aria-pressed="false">Flat</button>
+        </div>
+      </div>
+    </div>
+    <nav class="geo-crumb" id="geo-crumb" aria-label="Scope"></nav>
+
+    <div class="dg-stats" id="dg-stats"></div>
+
+    <div class="dg-stage">
+      <div class="dg-map-wrap" id="dg-map-wrap" data-view="globe">
+        <canvas id="threatMap" aria-label="Flat world map of ransomware leak-site claims by victim country"></canvas>
+        <div class="cp-globe" id="cp-globe" role="img" aria-label="Globe of leak-site claims by victim country"></div>
+        <div class="dg-tip" id="dg-tip" hidden></div>
+        <div class="dg-map-corner tl" id="dg-scope">SCOPE · WORLD</div>
+        <div class="dg-map-corner tr" id="dg-coords">LAT —  LON —</div>
+        <div class="dg-legend">
+          <span id="dg-legend-regions" class="dg-legend-regions"></span>
+          <span class="lg-heat"><b></b>claim density</span>
+          <span class="dg-legend-note">Arcs link countries hit by the same group. They don't show where an attack came from.</span>
+        </div>
+      </div>
+      <aside class="dg-side">
+        <div class="dg-panel-hd"><span id="dg-rank-title">Top targeted countries</span><span class="dg-panel-meta" id="dg-rank-meta"></span></div>
+        <ol class="dg-rank" id="dg-rank"></ol>
+        <div class="dg-panel-hd dg-groups-hd"><span>Most active groups</span><span class="dg-panel-meta">in scope</span></div>
+        <div class="dg-gchips" id="dg-gchips"></div>
+      </aside>
+    </div>
+
+    <div class="cp-chips" id="cp-chips" aria-label="Most-claimed countries in scope"></div>
+
+    <div class="dg-lower">
+      <div class="dg-feed">
+        <div class="dg-panel-hd"><span><span class="rec-dot"></span>Live claim feed</span><span class="dg-panel-meta" id="dg-feed-count">0</span></div>
+        <div class="ticker"><div class="ticker-track" id="dg-ticker"></div></div>
+      </div>
+      <div class="dg-achart dg-trend"><h4><span id="trend-title">News volume by region</span> <span id="trend-legend"></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
+    </div>
+
+    <div class="dg-analytics">
+      <div class="dg-achart"><h4>Top groups <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
+      <div class="dg-achart"><h4>Top sectors <span>leak-site claims · in scope</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
+    </div>
+
+    <section class="dg-ddos" aria-labelledby="ddos-title">
+      <div class="dg-ddos-hd">
+        <h3 id="ddos-title">DDoS intelligence</h3>
+        <span class="dg-panel-meta" id="ddos-scope">worldwide</span>
+      </div>
+      <p class="dg-ddos-lede">Three different signals, side by side. None of them confirms another: a claim is self-reported, Radar measures attack traffic in general (not any one attack), and a network going dark has many possible causes.</p>
+      <div class="dg-ddos-trio" id="ddos-trio"></div>
+      <div class="dg-ddos-grid" id="ddos-grid"><div class="empty">Loading…</div></div>
+      <p class="dg-note" id="ddos-note"></p>
+    </section>
+
+    <div id="cp-body" class="cp-body"><div class="empty">Loading…</div></div>
+    <div class="dg-note" id="dash-cov"></div>
+  </div>
+</section>
+<!-- 03 RANSOMWARE -->
+<section id="ransomware" class="section rw-page" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">02 / Ransomware</span>
-      <h2 style="margin:0">Ransomware victims</h2>
+      <span class="apj-num">03 / Ransomware</span>
+      <h2 style="margin:0">Ransomware &amp; extortion claims</h2>
+      <p class="rw-qualifier">Posts on criminal leak sites, collected by ransomware.live. A listing is the group&rsquo;s own claim &mdash; not a confirmed breach, and not proof data was taken.</p>
+      <p class="rw-fresh" id="rw-fresh"></p>
     </div>
     <div class="section-controls">
-      <div class="apj-seg" role="radiogroup" aria-label="Ransomware filter">
-        <button type="button" data-rwf="apj" aria-pressed="false">APJ</button>
-        <button type="button" data-rwf="global" aria-pressed="false">Global</button>
-        <button type="button" data-rwf="all" aria-pressed="false">All</button>
-      </div>
-      <select id="sector-filter" class="input" style="max-width:190px"><option value="all">All industries</option></select>
+      <button type="button" class="btn btn-secondary" id="rw-watch-btn" aria-haspopup="dialog">Watchlist</button>
     </div>
   </div>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-    <table class="table">
-      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Region</th><th>Claimed</th><th>Status</th></tr></thead>
+
+  <div class="kpis rw-kpis" id="rw-kpis" aria-label="Ransomware metrics for the selected period"></div>
+
+  <div class="rw-panels">
+    <div class="card rw-panel">
+      <div class="rw-panel-head"><span class="card-kicker">Daily claims</span><span class="rw-panel-sub" id="rw-trend-sub"></span></div>
+      <div class="rw-trend-wrap"><canvas id="rw-trend" role="img" aria-label="Claims observed per day; select a day to filter the table"></canvas></div>
+      <p class="rw-panel-note" id="rw-trend-note"></p>
+    </div>
+    <div class="card rw-panel">
+      <div class="rw-panel-head"><span class="card-kicker">Most active groups</span><span class="rw-panel-sub">select to filter</span></div>
+      <div class="rw-bars" id="rw-groups"></div>
+    </div>
+  </div>
+
+  <div class="rw-filters" role="search" aria-label="Filter claims">
+    <input id="rw-q" class="input" type="search" placeholder="Organization or domain" aria-label="Search organization or domain" autocomplete="off">
+    <select id="rw-f-group" class="input" aria-label="Group"><option value="">All groups</option></select>
+    <select id="rw-f-cc" class="input" aria-label="Country"><option value="">All countries</option></select>
+    <select id="sector-filter" class="input" aria-label="Sector"><option value="">All sectors</option></select>
+    <select id="rw-f-ev" class="input" aria-label="Evidence">
+      <option value="">Any evidence</option>
+      <option value="claim">Actor claim only</option>
+      <option value="reported">Independently reported</option>
+      <option value="social">Social mention</option>
+    </select>
+    <label class="rw-check"><input type="checkbox" id="rw-f-watch"> Watchlist only</label>
+  </div>
+  <div class="rw-chips" id="rw-chips"></div>
+
+  <div class="rw-tablebar">
+    <span id="rw-count" aria-live="polite"></span>
+    <div class="rw-tablebar-r">
+      <div class="rw-pager" id="rw-pager"></div>
+      <button type="button" class="btn btn-secondary" id="rw-export">Export CSV</button>
+    </div>
+  </div>
+  <div class="card table-wrap" style="padding:0">
+    <table class="table rw-table">
+      <thead><tr><th>Organization</th><th>Sector</th><th>Group</th><th>Country</th><th>Posted</th><th>Evidence</th></tr></thead>
       <tbody id="rw"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
     </table>
   </div>
-  <p class="apj-eyebrow" id="rw-cov" style="margin-top:var(--space-3)"></p>
-  <p class="text-muted" style="font-size:12px;margin-top:var(--space-2)">Source: ransomware.live leak-site claims — treat as claimed, not confirmed.</p>
+  <p class="rw-cov" id="rw-cov"></p>
 
   <div class="section-head" style="margin-top:var(--space-8)">
     <div class="section-head-left">
-      <h3 style="margin:0">Community &amp; social signal</h3>
-      <span class="apj-eyebrow">Mastodon — unmoderated, not vetted intelligence</span>
+      <h3 style="margin:0">Reporting</h3>
+    </div>
+    <div class="apj-seg" role="tablist" aria-label="Reporting type">
+      <button type="button" role="tab" data-rwtab="reports" aria-selected="true" aria-pressed="true">Corroborating reports</button>
+      <button type="button" role="tab" data-rwtab="community" aria-selected="false" aria-pressed="false">Community signals</button>
     </div>
   </div>
-  <div class="feed-grid" id="rw-news-list"><div class="empty">Loading…</div></div>
+  <p class="rw-panel-note" id="rw-news-note"></p>
+  <div class="rw-signal-list" id="rw-news-list"><div class="empty">Loading…</div></div>
 </section>
 
+<div class="rw-drawer-back" id="rw-drawer-back" hidden></div>
+<aside class="rw-drawer" id="rw-drawer" role="dialog" aria-modal="true" aria-labelledby="rw-drawer-title" hidden>
+  <div class="rw-drawer-head">
+    <div><span class="card-kicker" id="rw-drawer-kicker"></span><h3 id="rw-drawer-title" style="margin:2px 0 0"></h3></div>
+    <button type="button" class="btn btn-ghost rw-drawer-x" id="rw-drawer-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="rw-drawer-body" id="rw-drawer-body"></div>
+</aside>
+
 <!-- 04 VULNERABILITIES -->
-<section id="vulnerabilities" class="section" hidden>
+<section id="vulnerabilities" class="section vn-page" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">03 / Vulnerabilities</span>
-      <h2 style="margin:0">Critical vulnerabilities</h2>
+      <span class="apj-num">04 / Vulnerabilities</span>
+      <h2 style="margin:0">Vulnerability intelligence</h2>
+      <p class="rw-qualifier">High and critical CVEs from NVD (CVSS 7+), GitHub Security Advisories, and every recent entry in CISA&rsquo;s Known Exploited Vulnerabilities catalog, merged by CVE and scored with EPSS.</p>
+      <p class="rw-fresh" id="vn-fresh"></p>
     </div>
     <div class="section-controls">
-      <div class="apj-seg" role="radiogroup" aria-label="Vulnerability filter">
-        <button type="button" data-vf="all" aria-pressed="false">All</button>
-        <button type="button" data-vf="critical" aria-pressed="false">CVSS ≥ 9</button>
-        <button type="button" data-vf="epss" aria-pressed="false">EPSS ≥ 50%</button>
-        <button type="button" data-vf="kev" aria-pressed="false">Actively exploited</button>
-        <button type="button" data-vf="waf" aria-pressed="false">WAF-mitigable</button>
-      </div>
-      <input id="vuln-search" class="input search-input" type="text" placeholder="Filter by CVE, vendor, product…">
+      <button type="button" class="btn btn-secondary" id="vn-watch-btn" aria-haspopup="dialog">Watched products</button>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Sourced from NVD (CVSS 7+), GitHub Security Advisories, and CISA's Known Exploited Vulnerabilities catalog — merged and deduped by CVE ID. EPSS (FIRST.org) scores each CVE's probability of exploitation in the next 30 days, independent of CVSS severity — use it alongside CVSS to triage "severe and likely" over "severe but unlikely." <span class="wafdot" aria-hidden="true">🛡</span> marks CVE classes (SQL injection, XSS, RCE, SSRF, path traversal, deserialization, and similar request-shape bugs) a WAF or virtual-patch rule can typically mitigate at the edge — verify against the specific advisory before relying on it as your only control.</p>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-    <div class="vuln-scroll">
-      <table class="table vuln-table">
-        <colgroup>
-          <col style="width:32%"><col style="width:8%"><col style="width:8%"><col style="width:6%">
-          <col style="width:18%"><col style="width:12%"><col style="width:16%">
-        </colgroup>
-        <thead><tr><th>CVE</th><th>CVSS</th><th>EPSS</th><th>WAF</th><th>Vendor / Product</th><th>Status</th><th>Published / Added</th></tr></thead>
-        <tbody id="vuln-list"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
-      </table>
+  <details class="vn-how">
+    <summary>How prioritization works</summary>
+    <div class="vn-how-body">
+      <ol>
+        <li><b>Act now:</b> known exploited. The CVE is in CISA KEV, CISA&rsquo;s SSVC says exploitation is active, or the CNA reports attacks (CVSS 4.0 <span class="mono">E:A</span>). FIRST advises treating these as priority whatever their EPSS.</li>
+        <li><b>Likely exploited:</b> EPSS &ge; 10%, or a public exploit or proof of concept is referenced (an NVD &ldquo;Exploit&rdquo; reference, CVSS 4.0 <span class="mono">E:P</span>, or SSVC &ldquo;poc&rdquo;).</li>
+        <li><b>Severe:</b> CVSS &ge; 9 with no exploitation signal yet.</li>
+        <li><b>Monitor:</b> everything else.</li>
+      </ol>
+      <p>Within a tier, watched products come first, then higher EPSS, then higher CVSS, then newest. Every row lists the reasons behind its tier. EPSS estimates the probability of exploitation activity against a CVE in the next 30 days; it says nothing about whether <em>your</em> systems are exposed. CVSS measures severity, not risk. The same 10% EPSS line is used by the &ldquo;Likely exploited&rdquo; filter, the priority tiers and the matrix.</p>
+      <p><b>Edge (WAF) labels</b> are evidence levels. <em>Potential</em> is a preliminary match: a request-shape weakness (SQL injection, path traversal, SSRF&hellip;) on a network attack vector. <em>Documented</em> means a WAF vendor&rsquo;s rule or virtual-patch page is referenced. <em>Not applicable</em> means the vector or description says it isn&rsquo;t reached over a web edge. Whether a rule works in your environment is yours to record in each CVE&rsquo;s panel.</p>
     </div>
+  </details>
+
+  <div class="kpis rw-kpis" id="vn-kpis" aria-label="Vulnerability metrics"></div>
+
+  <div class="vn-datebar">
+    <label class="rw-dim" for="vn-date-field">Period by</label>
+    <select id="vn-date-field" class="input" style="width:auto">
+      <option value="activity">Latest activity</option>
+      <option value="published">Published</option>
+      <option value="modified">Last updated</option>
+      <option value="kev">Added to KEV</option>
+    </select>
+    <div class="apj-seg" role="radiogroup" aria-label="Vulnerability period">
+      <button type="button" data-vd="7" aria-pressed="false">7 days</button>
+      <button type="button" data-vd="30" aria-pressed="false">30 days</button>
+      <button type="button" data-vd="90" aria-pressed="false">90 days</button>
+      <button type="button" data-vd="0" aria-pressed="false">All retained</button>
+    </div>
+    <span class="rw-dim" id="vn-scope"></span>
   </div>
-  <p class="apj-eyebrow" id="vuln-cov" style="margin-top:var(--space-3)"></p>
+
+  <div class="vn-kev card" id="vn-kev"></div>
+
+  <div class="section-head" style="margin:var(--space-6) 0 var(--space-2)">
+    <div class="section-head-left"><h3 style="margin:0">Priority queue</h3></div>
+  </div>
+  <div class="vn-filters">
+    <input id="vuln-search" class="input" type="search" placeholder="CVE, vendor, product or keyword" aria-label="Search vulnerabilities" autocomplete="off">
+    <div class="apj-seg" role="radiogroup" aria-label="Vulnerability filter">
+      <button type="button" data-vf="all" aria-pressed="false">All</button>
+      <button type="button" data-vf="kev" aria-pressed="false">Known exploited</button>
+      <button type="button" data-vf="likely" aria-pressed="false">Likely exploited</button>
+      <button type="button" data-vf="critical" aria-pressed="false">CVSS &ge; 9</button>
+      <button type="button" data-vf="watch" aria-pressed="false">Watched</button>
+      <button type="button" data-vf="waf" aria-pressed="false">Edge candidates</button>
+    </div>
+    <select id="vn-sort" class="input" aria-label="Sort by" style="width:auto">
+      <option value="priority">Sort: priority</option>
+      <option value="cvss">Sort: CVSS</option>
+      <option value="epss">Sort: EPSS</option>
+      <option value="published">Sort: published</option>
+      <option value="modified">Sort: last updated</option>
+      <option value="kev">Sort: added to KEV</option>
+    </select>
+  </div>
+  <div class="rw-tablebar">
+    <span id="vn-count" aria-live="polite"></span>
+    <div class="rw-tablebar-r"><div class="rw-pager" id="vn-pager"></div></div>
+  </div>
+  <div class="card vn-tablewrap" style="padding:0">
+    <table class="table vn-table">
+      <colgroup><col class="vc-vuln"><col class="vc-pri"><col class="vc-cvss"><col class="vc-epss"><col class="vc-exp"><col class="vc-fix"><col class="vc-edge"></colgroup>
+      <thead><tr><th>Vulnerability</th><th>Priority</th><th>CVSS</th><th>EPSS</th><th>Exploitation</th><th>Fix</th><th>Edge</th></tr></thead>
+      <tbody id="vuln-list"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <p class="rw-cov" id="vuln-cov"></p>
+
+  <div class="section-head" style="margin:var(--space-8) 0 var(--space-2)">
+    <div class="section-head-left"><h3 style="margin:0">Recent changes</h3><span class="rw-panel-sub" id="vn-changes-sub"></span></div>
+  </div>
+  <div class="rw-signal-list" id="vn-changes"></div>
+
+  <details class="vn-analysis card" id="vn-analysis">
+    <summary><span class="card-kicker">Analysis</span> CVSS × EPSS matrix <span class="rw-dim">· follows the queue&rsquo;s filters · select a point to open it</span></summary>
+    <div class="vuln-matrix">
+      <div class="vuln-matrix-wrap"><canvas id="chartVulnMatrix" role="img" aria-label="Scatter plot of CVEs by CVSS score and EPSS probability; known-exploited CVEs in red"></canvas></div>
+      <div class="vuln-matrix-legend"><span><i class="lg-kev"></i>Known exploited (CISA KEV): review regardless of position</span><span><i class="lg-trk"></i>No known exploitation</span><span>Shaded: CVSS &ge; 9 and EPSS &ge; 10%, the same EPSS line as the priority tiers</span><span>Left lane: no CVSS score yet</span><span class="apj-eyebrow" id="vuln-matrix-note"></span></div>
+    </div>
+  </details>
 </section>
 
 <!-- 04 TELEGRAM -->
 <section id="telegram" class="section" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">04 / Telegram</span>
+      <span class="apj-num">05 / Telegram</span>
       <h2 style="margin:0">Telegram bot feed</h2>
     </div>
     <div class="section-controls">
@@ -200,139 +443,84 @@
 </section>
 
 <!-- 05 ACTORS -->
-<section id="actors" class="section" hidden>
+<section id="actors" class="section ac-page" hidden>
   <div class="section-head">
     <div class="section-head-left">
-      <span class="apj-num">05 / Actors</span>
-      <h2 style="margin:0">Threat actor tracker</h2>
-      <span class="apj-eyebrow">sorted by latest observed activity</span>
-    </div>
-    <div class="apj-seg" role="radiogroup" aria-label="Actor filter">
-      <button type="button" data-af="all" aria-pressed="false">All</button>
-      <button type="button" data-af="apj" aria-pressed="false">APJ / India</button>
-      <button type="button" data-af="global" aria-pressed="false">Global</button>
+      <span class="apj-num">06 / Actors</span>
+      <h2 style="margin:0">Threat actors</h2>
+      <p class="rw-qualifier">Hand-curated profiles of the groups most relevant here, a community alias directory, and activity measured from this app&rsquo;s own feeds. Attribution and relationships are the sources&rsquo; assessments, shown with their confidence.</p>
+      <p class="rw-fresh" id="ac-fresh"></p>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Curated baseline profiles — click a card to expand. Maintained by hand, not auto-refreshed.</p>
-  <div class="actor-grid" id="actors-list"></div>
 
-  <div class="section-head" style="margin-top:var(--space-8)">
-    <div class="section-head-left">
-      <span class="apj-num">Community sheet</span>
-      <h3 style="margin:0">APT groups &amp; operations directory</h3>
-      <span class="apj-eyebrow" id="apt-meta">loading…</span>
-    </div>
-    <div class="section-controls">
-      <div class="apj-seg" role="radiogroup" aria-label="Directory filter">
-        <button type="button" data-aptf="apj" aria-pressed="false">India / APJ</button>
-        <button type="button" data-aptf="all" aria-pressed="false">All groups</button>
-      </div>
-      <select id="apt-tab-filter" class="input" style="max-width:170px" aria-label="Country tab"><option value="all">All countries</option></select>
-      <input id="apt-search" class="input search-input" type="search" placeholder="Any name or alias — APT36, Fancy Bear, Mint Sandstorm…" aria-label="Search groups and aliases">
+  <div class="kpis rw-kpis" id="ac-kpis" aria-label="Actor metrics"></div>
+
+  <div class="ac-searchbar">
+    <input id="ac-q" class="input" type="search" placeholder="Search actor, alias, malware or campaign" aria-label="Search actors, aliases, malware or campaigns" autocomplete="off">
+    <div class="apj-seg" role="tablist" aria-label="Actor views">
+      <button type="button" role="tab" data-actab="tracked" aria-pressed="true" aria-selected="true">Tracked actors</button>
+      <button type="button" role="tab" data-actab="directory" aria-pressed="false" aria-selected="false">Alias directory</button>
+      <button type="button" role="tab" data-actab="trends" aria-pressed="false" aria-selected="false">Activity trends</button>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12.5px;margin:0 0 var(--space-3)">Maps each vendor's name for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0). Checked daily for edits. The sheet itself warns that attribution is complex and its mappings are best-effort — and it has had few additions since 2024, so treat it as an alias reference, not current activity. Click a row for operations, malware, and sources.</p>
-  <div class="card blueprint elev-sm" style="padding:var(--space-5);margin-bottom:var(--space-4)">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-    <div class="card-kicker">Recent sheet changes</div>
-    <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
+
+  <div id="ac-tracked" class="ac-view">
+    <div class="ac-filters">
+      <select id="ac-f-type" class="input" aria-label="Actor type"><option value="">All types</option></select>
+      <select id="ac-f-sector" class="input" aria-label="Targeted sector"><option value="">All sectors</option></select>
+      <select id="ac-f-ttp" class="input" aria-label="Technique"><option value="">All techniques</option></select>
+      <label class="rw-check"><input type="checkbox" id="ac-f-recent"> In reports, last 30 days</label>
+      <label class="rw-check"><input type="checkbox" id="ac-f-follow"> Followed only</label>
+    </div>
+    <p class="rw-dim ac-count" id="ac-count" aria-live="polite"></p>
+    <div class="ac-grid" id="actors-list"></div>
   </div>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-    <div class="vuln-scroll">
-      <table class="table vuln-table apt-table">
-        <colgroup><col style="width:20%"><col style="width:11%"><col style="width:37%"><col style="width:8%"><col style="width:24%"></colgroup>
-        <thead><tr><th>Group</th><th>Sheet tab</th><th>Also known as</th><th>MITRE</th><th>Targets</th></tr></thead>
+
+  <div id="ac-directory" class="ac-view" hidden>
+    <div class="ac-filters">
+      <select id="apt-tab-filter" class="input" aria-label="Sheet tab"><option value="all">All sheet tabs</option></select>
+      <span class="rw-dim" id="apt-meta">loading…</span>
+    </div>
+    <p class="rw-panel-note" style="margin:var(--space-2) 0 var(--space-3)">Vendor names for the same group (CrowdStrike, Mandiant, Kaspersky, Microsoft, Unit 42…) from <a id="apt-source" href="https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU" target="_blank" rel="noopener">APT Groups and Operations</a> by Florian Roth and contributors (CC BY 4.0), checked daily. These are directory <em>records</em>, not distinct actors: the same group can appear under several country tabs, and the sheet itself says its mappings are best-effort. Vendor names in one row may be partial overlaps rather than the same group. MITRE notes the same about associated group names. With a region picked, lists records whose targets name a country in it; a search looks across all records.</p>
+    <div class="rw-tablebar"><span id="apt-count" aria-live="polite"></span><div class="rw-pager" id="apt-pager"></div></div>
+    <div class="card table-wrap" style="padding:0">
+      <table class="table apt-table ac-table">
+        <colgroup><col style="width:22%"><col style="width:11%"><col style="width:37%"><col style="width:8%"><col style="width:22%"></colgroup>
+        <thead><tr><th>Group</th><th>Sheet tab</th><th>Vendor names (as listed)</th><th>MITRE</th><th>Targets</th></tr></thead>
         <tbody id="apt-list"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
-  </div>
-
-  <div class="rank-grid">
-    <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-      <div class="card-kicker">Top 10 — Ransomware claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· leak-site volume</span></div>
-      <div id="rank-ransomware"></div>
-    </div>
-    <div class="card blueprint elev-sm" style="padding:var(--space-6)">
-      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
-      <div class="card-kicker">Top 10 — DDoS claims <span class="text-muted" style="font-weight:400;text-transform:none;letter-spacing:normal">· hacktivist collectives</span></div>
-      <div id="rank-ddos"></div>
+    <div class="card elev-sm" style="padding:var(--space-5);margin-top:var(--space-4)">
+      <div class="card-kicker">Recent sheet changes</div>
+      <div id="apt-changes" class="text-muted" style="font-size:13px">Loading…</div>
     </div>
   </div>
-  <p class="text-muted" style="font-size:12px;margin-top:var(--space-2)">Curated snapshot, not live-collected — self-reported/leak-site claim volumes, not confirmed breach or attack counts. Hover a row for context.</p>
-</section>
 
-<!-- 06 MAP -->
-<section id="map" class="section section-wide" hidden>
-  <div class="darkgrid">
-    <header class="dg-top">
-      <div class="dg-top-left">
-        <span class="dg-num">06 / Map</span>
-        <h2 class="dg-h"><span class="pulse-dot"></span>DarkGrid <em>ransomware claim map</em></h2>
-        <div class="dg-sub" id="dg-updated">loading…</div>
+  <div id="ac-trends" class="ac-view" hidden>
+    <div class="rw-panels ac-trend-panels">
+      <div class="card rw-panel">
+        <div class="rw-panel-head"><span class="card-kicker">Most observed ransomware claims</span><span class="rw-panel-sub" id="ac-rw-sub"></span></div>
+        <div class="rw-bars" id="ac-rw-rank"></div>
+        <p class="rw-panel-note" id="ac-rw-note"></p>
       </div>
-      <div class="dg-top-right">
-        <div class="dg-clock" aria-label="Current UTC time"><span id="dg-clock">--:--:--</span><small>UTC</small></div>
-      </div>
-    </header>
-
-    <div class="dg-banner" id="dg-banner"><span class="lvl-dot"></span><span id="dg-banner-text">Loading INFOCON…</span></div>
-
-    <div class="dg-stats" id="dg-stats"></div>
-
-    <div class="dg-toolbar">
-      <div class="dg-regions" id="dg-regions" role="tablist" aria-label="Map region">
-        <button type="button" class="dg-rtab active" data-region="world">World</button>
-        <button type="button" class="dg-rtab" data-region="in">India</button>
-        <button type="button" class="dg-rtab" data-region="apac">APAC</button>
-        <button type="button" class="dg-rtab" data-region="na">N. America</button>
-        <button type="button" class="dg-rtab" data-region="sa">S. America</button>
-        <button type="button" class="dg-rtab" data-region="eu">Europe</button>
-        <button type="button" class="dg-rtab" data-region="me">Middle East</button>
-      </div>
-      <div class="dg-tools">
-        <input id="dg-locate" class="dg-locate" type="text" placeholder="Locate country…" autocomplete="off" aria-label="Locate country">
-        <button type="button" id="dg-reset" class="dg-reset" title="Reset to the default world view">Reset view</button>
+      <div class="card rw-panel">
+        <div class="rw-panel-head"><span class="card-kicker">Tracked actors named in reports</span><span class="rw-panel-sub" id="ac-men-sub"></span></div>
+        <div class="rw-bars" id="ac-men-rank"></div>
+        <p class="rw-panel-note">Counts items in this app&rsquo;s news feeds and Telegram/Mastodon posts that name a tracked actor or one of its aliases (whole-word match). A mention is not attribution.</p>
       </div>
     </div>
-
-    <div class="dg-stage">
-      <div class="dg-map-wrap" id="dg-map-wrap">
-        <canvas id="threatMap" aria-label="World map of ransomware leak-site claims by victim country"></canvas>
-        <div class="dg-tip" id="dg-tip" hidden></div>
-        <div class="dg-map-corner tl" id="dg-scope">SCOPE · WORLD</div>
-        <div class="dg-map-corner tr" id="dg-coords">LAT —  LON —</div>
-        <div class="dg-legend">
-          <span><i class="lg-in"></i>India</span>
-          <span><i class="lg-apj"></i>APJ</span>
-          <span><i class="lg-other"></i>Other</span>
-          <span class="lg-heat"><b></b>claim density</span>
-          <span class="dg-legend-note">Arcs link countries hit by the same group. They don't show where an attack came from.</span>
-        </div>
+    <div class="rank-grid">
+      <div class="card elev-sm" style="padding:var(--space-5)">
+        <div class="card-kicker">Selected ransomware operations</div>
+        <p class="rw-panel-note">Curated context, not a ranking: figures are as quoted in public reporting and use different periods and counting rules, so they aren&rsquo;t comparable with each other.</p>
+        <div id="rank-ransomware"></div>
       </div>
-      <aside class="dg-side">
-        <div class="dg-panel-hd"><span>Top targeted countries</span><span class="dg-panel-meta" id="dg-rank-meta"></span></div>
-        <ol class="dg-rank" id="dg-rank"></ol>
-        <div class="dg-panel-hd dg-groups-hd"><span>Most active groups</span><span class="dg-panel-meta">in scope</span></div>
-        <div class="dg-gchips" id="dg-gchips"></div>
-      </aside>
-    </div>
-
-    <div class="dg-lower">
-      <div class="dg-feed">
-        <div class="dg-panel-hd"><span><span class="rec-dot"></span>Live claim feed</span><span class="dg-panel-meta" id="dg-feed-count">0</span></div>
-        <div class="ticker"><div class="ticker-track" id="dg-ticker"></div></div>
+      <div class="card elev-sm" style="padding:var(--space-5)">
+        <div class="card-kicker">Selected hacktivist DDoS groups</div>
+        <p class="rw-panel-note">Curated context, not a ranking: mostly self-reported claim volumes and shares from different reports and periods. Not confirmed attack counts.</p>
+        <div id="rank-ddos"></div>
       </div>
-      <div class="dg-achart dg-trend"><h4>Signal volume <span><span class="sw sw-in">India</span><span class="sw sw-apj">APJ</span><span class="sw sw-gl">Global</span></span></h4><div class="dg-chartwrap"><canvas id="chartTrend"></canvas></div></div>
     </div>
-
-    <div class="dg-analytics">
-      <div class="dg-achart"><h4>Top groups <span>leak-site claims</span></h4><div class="dg-chartwrap"><canvas id="chartGroups"></canvas></div></div>
-      <div class="dg-achart"><h4>Top sectors <span>leak-site claims</span></h4><div class="dg-chartwrap"><canvas id="chartSectors"></canvas></div></div>
-      <div class="dg-achart dg-radar"><h4>Real DDoS attack traffic <span>Cloudflare Radar · measured, not claimed</span></h4><div id="radar-ddos" class="radar-grid"></div></div>
-    </div>
-    <div class="dg-note" id="dash-cov"></div>
   </div>
 </section>
 
@@ -364,8 +552,8 @@
     </div>
     <div id="ipcheck-result" class="ipcheck-result" aria-live="polite"></div>
   </form>
-  <div class="card blueprint table-wrap" style="padding:0">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card table-wrap" style="padding:0">
+    
     <div class="vuln-scroll">
       <table class="table vuln-table">
         <colgroup>
@@ -382,14 +570,14 @@
 
 <!-- EXPORT -->
 <section class="section" style="padding-top:var(--space-4)">
-  <div class="card blueprint export-banner">
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+  <div class="card export-banner">
+    
     <div>
       <div class="card-title">Export today's picture</div>
       <p class="card-body" style="margin:0; max-width:56ch">Markdown export bundles today's brief for pasting elsewhere.</p>
     </div>
     <div class="export-actions">
-      <button type="button" class="btn btn-primary blueprint" data-action="download-brief"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Download brief</button>
+      <button type="button" class="btn btn-primary" data-action="download-brief">Download brief</button>
       <span class="copy-status"></span>
     </div>
   </div>
@@ -398,7 +586,7 @@
 <footer class="site-foot">
   <div class="foot-grid">
     <div>
-      <strong>Auto-collected every 30 min:</strong> BleepingComputer, The Hacker News, SANS ISC, Infosecurity Magazine, Akamai Blog, JPCERT/CC, Unit 42, Talos, Securelist, CISA Advisories, Krebs on Security, Dark Reading, Cyble, NCSC UK, ransomware.live, CISA KEV, GitHub Security Advisories, NVD (CVSS 7+), EPSS, OpenPhish, MISP (CIRCL OSINT), Telegram (CTI Now, Cyber Detective, AVLeonov, Ummah Sec, Hackmanac), Mastodon (#ransomware, ransomwatch)<span id="foot-abusech"></span><span id="foot-radar"></span>.
+      <strong>Auto-collected every 30 min:</strong> BleepingComputer, The Hacker News, SANS ISC, Infosecurity Magazine, Akamai Blog, JPCERT/CC, Unit 42, Talos, Securelist, CISA Advisories, Krebs on Security, Dark Reading, Cyble, NCSC UK, ransomware.live, CISA KEV, GitHub Security Advisories, NVD (CVSS 7+), EPSS, OpenPhish, MISP (CIRCL OSINT), Telegram (CTI Now, Cyber Detective, AVLeonov, Ummah Sec, Hackmanac), Mastodon (#ransomware, ransomwatch), IODA internet outages (Georgia Tech)<span id="foot-abusech"></span><span id="foot-radar"></span>.
       <div style="margin-top:var(--space-2)"><strong>Check manually:</strong>
         <a href="https://www.cert-in.org.in/" target="_blank" rel="noopener">CERT-In</a> ·
         <a href="https://cyble.com/blog/" target="_blank" rel="noopener">Cyble</a> ·
@@ -411,6 +599,7 @@
     </div>
     <div class="foot-right">
       <div>Threat Intelligence</div>
+      <div class="foot-credit">Built by Suhas Sainthan</div>
     </div>
   </div>
 </footer>
